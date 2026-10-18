@@ -22,7 +22,7 @@ ensemble:
     llm: 1.2
 
 agents:
-  - id: classifier-main
+  - id: zond-main
     endpoint: https://api.example/v1/chat
     model: gpt-4o-mini
     api_key_env: LLM_MAIN_KEY # имя env-переменной, не ключ
@@ -30,8 +30,8 @@ agents:
     timeout_s: 30
     max_retries: 3
     confidence_band: [0.30, 0.70] # вызывать только в «серой зоне»
-    escalate_to: classifier-strong
-  - id: classifier-strong
+    escalate_to: zond-strong
+  - id: zond-strong
     endpoint: https://api.example/v1/chat
     model: gpt-4o
     api_key_env: LLM_STRONG_KEY

@@ -1,4 +1,4 @@
-# Архитектура системы `classifier` — модель реализации (v1)
+# Архитектура системы `zond` — модель реализации (v1)
 
 Дата: 2026-10-17. Производный рабочий документ от `blueprint.md` (единственный
 источник правды). Blueprint отвечает на «что строим и почему» (ADR, контракты,
@@ -18,7 +18,7 @@ DoD); этот документ — на «как устроено внутри 
 Принципы, из которых выводится всё остальное:
 
 1. **Компилируемый артефакт важнее распределённости.** Один бинарник
-   `classifier`, весь runtime — внутри одного процесса; HA/multi-node сознательно
+   `zond`, весь runtime — внутри одного процесса; HA/multi-node сознательно
    вне скоупа (blueprint п. 15.1, п. 20).
 2. **Ядро чистое, зависимости направлены внутрь.** Доменные пакеты не знают
    ни о БД, ни о HTTP, ни о LLM; адаптеры зависят от интерфейсов-портов,
@@ -48,7 +48,7 @@ DoD); этот документ — на «как устроено внутри 
                                  │ HTTPS
               ┌──────────┐   ACS/   │          ┌───────────────────────┐
               │ Корпоративный │◀──SAML──▶│                     │ LLM-агенты            │
-              │ IdP (Keycloak,│  SLO     │  classifier        │ (OpenAI-compatible:    │
+              │ IdP (Keycloak,│  SLO     │  zond        │ (OpenAI-compatible:    │
               │ ADFS, Entra) │          │  (single binary,   │  внешние API / локаль- │
               └──────────┘          │   scan + serve)    │  ные Ollama, vLLM)    │
                                  │        │          └───────────▲───────────┘
@@ -73,7 +73,7 @@ SIEM (опция). Всё остальное — внутри одного пр�
 ## 3. Компонентная структура (C4, уровень 2)
 
 ```
-cmd/classifier/          scan │ serve │ migrate │ eval │ seed │ agent-check
+cmd/zond/          scan │ serve │ migrate │ eval │ seed │ agent-check
                          token │ audit │ backup │ doctor │ version
         │
         ▼
@@ -241,7 +241,7 @@ checksum побеждает; `score[l]=Σ(w·c)`; `tau_accept=0.80`, отрыв 
   скан пишет вердикты/чекпоинты, аудит — свои записи; UI читает напрямую (WAL
   даёт читателей без блокировки записи). Это снимает `SQLITE_BUSY` и гонки.
 - Таблицы и индексы — blueprint п. 11.1 (включая `audit_log`, `api_tokens`).
-- `classifier backup`: `VACUUM INTO` на живой БД; учебное восстановление в DoD
+- `zond backup`: `VACUUM INTO` на живой БД; учебное восстановление в DoD
   (blueprint п. 15.2).
 
 ### 5.5. Аудит (hash-chain)
@@ -304,7 +304,7 @@ serve (1 процесс)
 
 | Пакет | Ответственность | Ключевые типы |
 |---|---|---|
-| `cmd/classifier` | подкоманды, wiring (конструирование графа) | main, subcommand funcs |
+| `cmd/zond` | подкоманды, wiring (конструирование графа) | main, subcommand funcs |
 | `internal/config` | загрузка/валидация 3 YAML, ${ENV}-интерполяция, fingerprint | Config, Validator |
 | `internal/connector` | SPI + registry + conftest | Connector, TableRef, SampleSpec |
 | `internal/connector/clickhouse` | системные таблицы, SAMPLE/rand, сложные типы | clickhouseConnector |
@@ -421,7 +421,7 @@ pure-Go), MIT/BSD/Apache-2.0, без обязательных внешних д�
 
 | Этап (blueprint п. 21) | Основные пакеты | Вертикальный результат |
 |---|---|---|
-| 0. Скелет (1 нед) | cmd, config, connector (SPI), logging, Makefile/CI | `classifier version`, валидный конфиг |
+| 0. Скелет (1 нед) | cmd, config, connector (SPI), logging, Makefile/CI | `zond version`, валидный конфиг |
 | 1. Вертикальный срез (1.5 нед) | connector/clickhouse, sampler, analyze/meta+rules (email/phone/INN/Luhn), verdict/store | scan CH → консольный отчёт |
 | 2. Mongo (1.5–2 нед) | connector/mongodb, conftest | обе БД через один SPI, контракт-тесты зелёные |
 | 3. Regex-слой (1.5–2 нед) | analyze/rules полный, fingerprint | RU-матчеры + золотые вектора, кластеризация |

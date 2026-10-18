@@ -44,7 +44,7 @@ commercial-landscape.md) — те файлы носят исторический
 
 | # | Решение | Суть | Последствия |
 |---|---|---|---|
-| ADR-0001 | **Go 1.24, single binary** | Один бинарник `classifier` со встроенным веб-UI (embed.FS), без внешних runtime-зависимостей | Отказ от Python-экосистемы (см. ADR-0002/0003); простой деплой, air-gapped-режим из коробки |
+| ADR-0001 | **Go 1.24, single binary** | Один бинарник `zond` со встроенным веб-UI (embed.FS), без внешних runtime-зависимостей | Отказ от Python-экосистемы (см. ADR-0002/0003); простой деплой, air-gapped-режим из коробки |
 | ADR-0002 | **Свой regex-движок слоя 1** | Вместо Python-библиотеки Presidio — собственный движок recognizer'ов; RU-матчеры (ИНН, СНИЛС, паспорт, счета) **портируем** из angryscan-core (Apache-2.0, NOTICE обязателен); Luhn/IBAN/email/IP — пишем по спецификациям | Этап regex-слоя растёт с ~3 дней до ~1,5–2 нед; полный контроль над форматом, ноль Python-зависимостей |
 | ADR-0003 | **Локальный NER-слой — в v2, не в MVP** | GLiNER/Piiranha — Python-модели; в Go нет zero-shot NER приемлемого качества. В MVP каскад: слой 0 (метаданные) → слой 1 (regex) → слой 2 (LLM). v2: ONNX-runtime sidecar с GLiNER между regex и LLM | В MVP больше колонок доходит до LLM — компенсируем кластеризацией, жёсткими порогами и кэшем (п. 10) |
 | ADR-0004 | **Таксономия как код** | Список лейблов и enum чувствительности — версионируемые артефакты (`internal/taxonomy/taxonomy.yaml` + сгенерированные Go-константы, semver) | Промпт, ансамбль, API и UI говорят на одном языке; смена версии таксономии инвалидирует кэш |
@@ -61,8 +61,8 @@ commercial-landscape.md) — те файлы носят исторический
 
 ## 3. Стек и зависимости
 
-Go **1.24** (минимум 1.23 — итераторы `iter.Seq2`). Модуль: `github.com/<org>/classifier`
-(рабочее имя артефакта — `classifier`, переименование — механическая замена).
+Go **1.24** (минимум 1.23 — итераторы `iter.Seq2`). Модуль: `github.com/DunchikVlad/zond`
+(рабочее имя артефакта — `zond`, переименование — механическая замена).
 
 | Назначение | Модуль | Примечание |
 |---|---|---|
@@ -86,9 +86,9 @@ Go **1.24** (минимум 1.23 — итераторы `iter.Seq2`). Модул
 ## 4. Структура репозитория
 
 ```
-classifier/
+zond/
 ├── cmd/
-│   ├── classifier/            # main: подкоманды scan | serve | migrate | eval | seed | agent-check
+│   ├── zond/            # main: подкоманды scan | serve | migrate | eval | seed | agent-check
 │   └── seed/                  # генератор демо-данных CH/Mongo (Faker-аналог на Go)
 ├── internal/
 │   ├── config/                # загрузка/валидация YAML, ${ENV}-интерполяция секретов
@@ -252,7 +252,7 @@ scan:
 
 ```yaml
 agents:
-  - id: classifier-main
+  - id: zond-main
     endpoint: https://api.example/v1/chat
     model: gpt-4o-mini
     api_key_env: LLM_MAIN_KEY      # имя env-переменной, не сам ключ
@@ -260,7 +260,7 @@ agents:
     timeout_s: 30
     max_retries: 3
     confidence_band: [0.30, 0.70]  # вызывать только в «серой зоне»
-    escalate_to: classifier-strong # необязательный второй агент-верификатор
+    escalate_to: zond-strong # необязательный второй агент-верификатор
 ```
 
 ### 5.4 Модель вердикта
@@ -637,8 +637,8 @@ sources:
 
 sso:                            # веб-UI: вход через корпоративный IdP (ADR-0011)
   enabled: true
-  entity_id: "https://classifier.example.com/saml/metadata"
-  acs_url: "https://classifier.example.com/saml/acs"
+  entity_id: "https://zond.example.com/saml/metadata"
+  acs_url: "https://zond.example.com/saml/acs"
   idp_metadata_url: "${IDP_METADATA_URL}"   # либо idp_metadata_file: ./idp.xml
   name_id_format: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"
   role_attribute: "Role"                    # admin | viewer; fallback — группы IdP
@@ -674,13 +674,13 @@ vault:
   address: "https://vault.example.com"
   auth:
     method: kubernetes        # контур K8s: JWT сервис-аккаунта
-    role: classifier
+    role: zond
     # method: token + token_env: VAULT_TOKEN   # только dev/демо!
   secrets:
     - ref: ch-prod            # совпадает с name источника
       path: database/creds/ch-prod-readonly   # dynamic: лиза с авто-ротацией
     - ref: mongo-prod
-      path: kv/data/classifier/mongo-prod     # kv-v2: ключ uri=...
+      path: kv/data/zond/mongo-prod     # kv-v2: ключ uri=...
       key: uri
 ```
 
@@ -707,7 +707,7 @@ vault:
 - Скан — конечный автомат: `running → (done | partial | interrupted | failed |
   budget_exceeded)`; переходы фиксируются в `scans.status` транзакционно.
 - Чекпоинт после каждой таблицы: `scan_tables.status` + commit вердиктов таблицы.
-  Резюм: `classifier scan --resume <scan_id>` пропускает `done`-таблицы.
+  Резюм: `zond scan --resume <scan_id>` пропускает `done`-таблицы.
   Допускается, только если совпали `config_fingerprint`, `taxonomy_version`
   и версия бинарника; иначе отказ (код 2) с перечнем расхождений.
 - Вызовы LLM атомарны относительно вердикта: либо `agent_calls`+`verdicts`,
@@ -810,18 +810,18 @@ vault:
   - *Администрирование*: смена ролей, выпуск/отзыв API-токенов.
 - **Программный доступ к API** (для CI/интеграций, в обход SSO): отдельные
   API-токены с scope `read | review | export | admin`, выпуск через
-  `classifier token issue`, хранение только хэшем (argon2), отзыв —
+  `zond token issue`, хранение только хэшем (argon2), отзыв —
   мгновенный; действия токена в аудите с `actor = token:<id>`.
 - API-токены имеют срок действия (default 90 дней, настраивается);
   `last_used_at` обновляется не чаще раза в час. Ротация — выпуск нового
-  и отзыв старого (`classifier token issue|revoke`); отзыв мгновенный.
+  и отзыв старого (`zond token issue|revoke`); отзыв мгновенный.
 - **Доступ**: просмотр аудита — только роль `admin`, страница `/audit` в UI
-  (фильтры по actor/типу/дате/scan_id) и `classifier audit export`.
+  (фильтры по actor/типу/дате/scan_id) и `zond audit export`.
   Ретенция ≥180 дней либо выгрузка в SIEM; архивы проверяются по hash-chain.
 
 ## 15. Деплой и эксплуатация
 
-- **Артефакт**: один бинарник `classifier` + файлы конфигурации. Команды:
+- **Артефакт**: один бинарник `zond` + файлы конфигурации. Команды:
   `scan`, `serve` (API+UI), `migrate`, `eval`, `seed`, `agent-check`
   (проверка доступности/формата ответа агента на тестовых значениях).
 - **Dev/demo-контур**: `deploy/docker-compose.yml` = app + ClickHouse + MongoDB +
@@ -850,7 +850,7 @@ one-shot-запусков. SQLite — единственная БД инстан
 
 ### 15.2 Резервное копирование Verdict Store
 
-- `classifier backup --out <path>`: онлайн-копия через `VACUUM INTO`
+- `zond backup --out <path>`: онлайн-копия через `VACUUM INTO`
   (без остановки сервиса), шифрование — на уровне ФС/диска (п. 14);
   расписание — cron инстанса или `schedule` в конфиге.
 - RPO ≤24 ч; раз в релиз — учебное восстановление в пустой инстанс
@@ -858,7 +858,7 @@ one-shot-запусков. SQLite — единственная БД инстан
 - Копии хранятся вне инстанса (S3/WORM — по той же политике, что
   снапшоты аудита, п. 14.2).
 
-### 15.3 Preflight (`classifier doctor`)
+### 15.3 Preflight (`zond doctor`)
 
 Проверки перед вводом в эксплуатацию: свободное место на томе SQLite
 (≥2× размера БД); доступность каждого источника (`Ping` + probe `SELECT`
@@ -1091,7 +1091,7 @@ ADR-0011–0013). Точка раннего сигнала: конец этап�
 - F1 семантических типов (PERSON_NAME, ADDRESS, FREE_TEXT, GEO_LOCATION)
   на эталонном датасете ≥0.75 (порог риска R1).
 - Учебное восстановление из бэкапа (п. 15.2) успешно: hash-chain аудита
-  сходится, `classifier doctor` на эталонном контуре — все проверки OK.
+  сходится, `zond doctor` на эталонном контуре — все проверки OK.
 - `make smoke` с нуля на чистой машине ≤15 минут до первых вердиктов.
 
 ## 22.1 Runbook / SRE-готовность
@@ -1151,7 +1151,7 @@ ADR-0011–0013). Точка раннего сигнала: конец этап�
 ## 24. Smoke-сценарий «одна команда»
 
 ```bash
-git clone <repo> && cd classifier
+git clone <repo> && cd zond
 make smoke        # build + подъём compose (app, CH, Mongo, seed)
 # → seed наполняет CH/Mongo демо-данными (вкл. РФ-форматы)
 # → app выполняет quick-скан обоих источников
@@ -1209,6 +1209,10 @@ make eval         # эталонный датасет + отчёт F1 и $/1000 
   зависимостей, потоки исполнения, механизмы, карта пакетов, деплой-вид,
   анти-архитектура, traceability этапов). Содержание blueprint не изменено;
   источник правды — по-прежнему этот файл.
+- **2026-10-18 (доп. 6)**: рабочее имя артефакта изменено `classifier` → **`zond`**
+  (механическая замена, разрешённая п. 3): пп. 1, 3, 4, 15, 21, 23, 24; в примерах
+  конфигов id агентов — `zond-main`/`zond-strong`. Этап 0 реализован (модуль
+  `github.com/DunchikVlad/zond`, см. docs/progress/2026-10-18-stage-0.md).
 - **2026-10-18 (доп. 5)**: усилены эксплуатационные и governance-аспекты:
   добавлены правила версионирования API/конфигов/миграций (п. 18.1),
   privacy/data governance (п. 18.2), обязательный список решений до старта
