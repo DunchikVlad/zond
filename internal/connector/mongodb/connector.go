@@ -182,6 +182,9 @@ func (c *mgoConnector) sampleDocs(ctx context.Context, t connector.TableRef, siz
 		if err := cur.Decode(&doc); err != nil {
 			return nil, err
 		}
+		for k, v := range doc {
+			doc[k] = normalize(v)
+		}
 		out = append(out, doc)
 	}
 	return out, cur.Err()

@@ -2,7 +2,10 @@ package mongodb
 
 import (
 	"reflect"
+	"sort"
 	"testing"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // Эталонные кейсы флаттенинга по blueprint п. 8.
@@ -226,4 +229,59 @@ func FuzzFlattenDocument(f *testing.F) {
 			}
 		}
 	})
+}
+
+// TestNormalizeDriverTypes — регрессия: драйвер отдаёт вложенные документы/массивы
+// именованными типами bson.D/bson.A, которые type switch на map[string]any/[]any
+// не ловил — схема вырождалась в top-level пути (поймано conftest в CI, п. 16.2).
+func TestNormalizeDriverTypes(t *testing.T) {
+	doc := map[string]any{
+		"email": "ivan@example.com",
+		"address": bson.D{
+			{Key: "city", Value: "Moscow"},
+			{Key: "zip", Value: "101000"},
+		},
+		"tags": bson.A{"vip", "beta"},
+		"items": bson.A{
+			bson.D{{Key: "sku", Value: "A1"}, {Key: "qty", Value: 2}},
+		},
+	}
+	for k, v := range doc {
+		doc[k] = normalize(v)
+	}
+
+	got := flattenDocument(doc)
+	for _, p := range []string{"address.city", "address.zip", "tags[]", "items[].sku", "items[].qty"} {
+		if _, ok := got[p]; !ok {
+			t.Fatalf("путь %q не построен: %v", p, keys(got))
+		}
+	}
+
+	agg := newSchemaAggregator()
+	agg.addDocument(doc)
+	types := map[string]string{}
+	for _, c := range agg.schema() {
+		types[c.name] = c.nativeType
+	}
+	want := map[string]string{
+		"email":        "string",
+		"address.city": "string",
+		"tags[]":       "string",
+		"items[].sku":  "string",
+		"items[].qty":  "number",
+	}
+	for p, typ := range want {
+		if types[p] != typ {
+			t.Fatalf("путь %s: тип %q, ожидался %q (все: %v)", p, types[p], typ, types)
+		}
+	}
+}
+
+func keys(m map[string][]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

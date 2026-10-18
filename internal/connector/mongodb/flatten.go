@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 const (
@@ -59,9 +61,44 @@ func bsonType(v any) string {
 		return "array"
 	default:
 		// time.Time, primitive.ObjectID, primitive.Binary (UUID) и прочие
-		// драйверные типы приходят уже приведёнными к базовым в toAny,
-		// сюда попадают только неприведённые — считаем их строкоподобными.
+		// драйверные типы, не покрытые явными ветками. Вложенные документы и
+		// массивы сюда попадать не должны: sampleDocs нормализует bson.D/bson.A
+		// к map[string]any/[]any (type switch не совпадает с именованными типами).
 		return "string"
+	}
+}
+
+// normalize рекурсивно приводит драйверные BSON-типы к базовым Go-типам:
+// bson.D → map[string]any, bson.A → []any. Без этого вложенные документы
+// и массивы проскакивали в default-ветки bsonType/flattenInto (type switch
+// по map[string]any/[]any не совпадает с именованными типами bson.D/bson.A)
+// и схема вырождалась в top-level пути — поймано conftest в CI (п. 16.2).
+func normalize(v any) any {
+	switch t := v.(type) {
+	case bson.D:
+		m := make(map[string]any, len(t))
+		for _, e := range t {
+			m[e.Key] = normalize(e.Value)
+		}
+		return m
+	case bson.A:
+		s := make([]any, len(t))
+		for i, el := range t {
+			s[i] = normalize(el)
+		}
+		return s
+	case map[string]any:
+		for k, el := range t {
+			t[k] = normalize(el)
+		}
+		return t
+	case []any:
+		for i, el := range t {
+			t[i] = normalize(el)
+		}
+		return t
+	default:
+		return v
 	}
 }
 

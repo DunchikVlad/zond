@@ -1,6 +1,10 @@
 # golangci-lint v2 (формат конфига — v2, см. CI workflow).
-# Правило depguard закрепляет слои из architecture.md п. 3:
-# domain (verdict, analyze) не импортирует инфраструктуру (HTTP, драйверы БД).
+# Правила depguard закрепляют границы из architecture.md п. 3 и blueprint п. 10.1.
+#
+# ВАЖНО: depguard `files` — это GLOB-шаблоны (doublestar), НЕ regex!
+# Якоря `^`, группы `(...)`, альтернативы `|` здесь просто не матчат ни один
+# файл — правило молча становится вакуумным (поймано пропавшим срабатыванием
+# positive control). Отрицания `!` поддержаны и работают вместе с `$all`.
 version: "2"
 
 linters:
@@ -14,8 +18,8 @@ linters:
       rules:
         domain-no-infrastructure:
           files:
-            - "^internal/verdict(/|$)"
-            - "^internal/analyze(/|$)"
+            - "**/internal/verdict/**"
+            - "**/internal/analyze/**"
           deny:
             - pkg: net/http
               desc: "domain не импортирует HTTP-клиенты (architecture.md п. 3)"
@@ -24,10 +28,15 @@ linters:
             - pkg: go.mongodb.org/mongo-driver/**
               desc: "domain не зависит от драйверов БД (architecture.md п. 3)"
         llm-only-via-agentproxy:
+          # net/http разрешён только в internal/agentproxy (единственная точка
+          # вызова LLM, blueprint п. 10.1) и в *_test.go (fake-LLM httptest).
+          # cmd/api/web намеренно не исключены из запрета на уровне этого
+          # правила: их HTTP-код появится на этапе 5 — тогда конфиг дополнят
+          # (ADR), сейчас правило поймает LLM-вызовы вне proxy.
           files:
-            - $all
-            - "!^internal/agentproxy(/|$)"
-            - "!_test.go$"
+            - "$all"
+            - "!**/internal/agentproxy/**"
+            - "!**/*_test.go"
           deny:
             - pkg: net/http
               desc: "вызов LLM только через agentproxy (blueprint п. 10.1)"
