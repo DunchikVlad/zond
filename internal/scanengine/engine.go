@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DunchikVlad/zond/internal/agentproxy"
 	"github.com/DunchikVlad/zond/internal/analyze/meta"
 	"github.com/DunchikVlad/zond/internal/analyze/rules"
 	"github.com/DunchikVlad/zond/internal/connector"
@@ -27,14 +28,26 @@ import (
 // Config — параметры движка, получаемые из detectors.yaml + taxonomy.yaml.
 type Config struct {
 	TauAccept        float64
+	TauReview        float64
+	Weights          map[string]float64 // meta | rules | llm (ensemble.weights)
+	GrayBand         [2]float64         // confidence_band агента (серая зона)
 	SampleMode       connector.SampleMode
 	SampleValue      float64
 	MaxRows          int64
 	MaxStringChars   int
 	Dedup            bool
+	MinValuesForLLM  int // сэмпл меньше — LLM не вызывается (п. 7)
 	TaxonomyVersion  string
 	DetectorsVersion string
 	Sensitivity      map[verdict.Label]verdict.Sensitivity
+	TaxonomyLabels   []string // enum лейблов для промпта LLM
+}
+
+// LLMClassifier — минимальный интерфейс LLM-слоя для движка (п. 7).
+// Реализуется agentproxy.Proxy; в тестах — fake. nil → слой 2 отключён.
+type LLMClassifier interface {
+	Classify(ctx context.Context, nativeType string, values []string) (*agentproxy.ClassifyResult, error)
+	Verify(ctx context.Context, candidate, nativeType string, values []string) (*agentproxy.VerifyResult, error)
 }
 
 // Engine — движок сканирования одного источника.
@@ -42,6 +55,7 @@ type Engine struct {
 	st    *store.Store
 	meta  *meta.Analyzer
 	recs  []rules.Recognizer
+	llm   LLMClassifier // nil → слой 2 (LLM) отключён
 	cfg   Config
 	nowFn func() time.Time
 }
@@ -50,6 +64,9 @@ type Engine struct {
 func New(st *store.Store, m *meta.Analyzer, cfg Config) *Engine {
 	return &Engine{st: st, meta: m, recs: rules.Default(), cfg: cfg, nowFn: time.Now}
 }
+
+// SetLLM подключает LLM-слой (этап 4): серый коридор + эскалация (п. 7).
+func (e *Engine) SetLLM(llm LLMClassifier) { e.llm = llm }
 
 // Report — итог прогона (консольный отчёт этапа 1).
 type Report struct {
@@ -222,11 +239,12 @@ func (e *Engine) classifyColumn(ctx context.Context, conn connector.Connector, s
 	if err != nil {
 		return verdict.Verdict{}, err
 	}
-	return e.verdict(scanID, t, col, pool), nil
+	return e.verdict(ctx, scanID, t, col, pool), nil
 }
 
-// verdict собирает вердикт колонки: слой 0 (имя) + слой 1 (rules) → ensemble.
-func (e *Engine) verdict(scanID string, t connector.TableRef, col connector.Column, pool *sampler.Pool) verdict.Verdict {
+// verdict собирает вердикт колонки: слой 0 (имя) + слой 1 (rules) + слой 2 (LLM,
+// серый коридор) → ensemble (п. 7).
+func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRef, col connector.Column, pool *sampler.Pool) verdict.Verdict {
 	sum := sha1.Sum([]byte(scanID + "|" + t.Name + "|" + col.Name)) // п. 5.4
 	v := verdict.Verdict{
 		ID:               hex.EncodeToString(sum[:]),
@@ -256,7 +274,31 @@ func (e *Engine) verdict(scanID string, t connector.TableRef, col connector.Colu
 		}
 	}
 
-	out := ensemble.Decide(cands, e.cfg.TauAccept)
+	// слой 2 (LLM) — только серый коридор и достаточный сэмпл (п. 7);
+	// small_sample или null>0.95 → вызов не делается.
+	gray := e.grayBand()
+	weights := ensemble.Weights{}
+	for k, wgt := range e.cfg.Weights {
+		weights[verdict.EvidenceLayer(k)] = wgt
+	}
+	out := ensemble.Decide(cands, e.cfg.TauAccept, weights, gray)
+
+	// серый коридор: вызов LLM-классификатора (этап 4), затем эскалация.
+	if e.llm != nil && out.Escalate && e.enoughForLLM(pool) {
+		if res, err := e.llm.Classify(ctx, col.NativeType, pool.Values); err == nil && res != nil {
+			v.PromptVersion = res.PromptVersion
+			cands = append(cands, ensemble.Candidate{Label: verdict.Label(res.Label), Confidence: res.Confidence, Layer: verdict.LayerLLM})
+			out = ensemble.Decide(cands, e.cfg.TauAccept, weights, gray)
+		}
+		// эскалация в верификатор, если решение всё ещё в серой зоне (п. 7 правило 4)
+		if out.Escalate {
+			if vr, err := e.llm.Verify(ctx, string(out.GrayBest.Label), col.NativeType, pool.Values); err == nil && vr != nil {
+				out = ensemble.ApplyVerifier(out, ensemble.VerifierOutcome{
+					Verdict: vr.Verdict, Label: verdict.Label(vr.Label), Confidence: vr.Confidence,
+				}, e.cfg.TauAccept)
+			}
+		}
+	}
 	v.Label = out.Label
 	v.Confidence = out.Confidence
 	v.EvidenceLayer = out.Layer
@@ -274,6 +316,39 @@ func (e *Engine) verdict(scanID string, t connector.TableRef, col connector.Colu
 		v.Evidence["reason"] = "small_sample"
 	}
 	return v
+}
+
+// grayBand — серая зона confidence для LLM/эскалации (confidence_band агента).
+// По умолчанию [tau_review, tau_accept] если явно не задана.
+func (e *Engine) grayBand() [2]float64 {
+	if e.cfg.GrayBand[0] != 0 || e.cfg.GrayBand[1] != 0 {
+		return e.cfg.GrayBand
+	}
+	lo := e.cfg.TauReview
+	hi := e.cfg.TauAccept
+	if lo <= 0 {
+		lo = 0.3
+	}
+	if hi <= lo {
+		hi = 0.7
+	}
+	return [2]float64{lo, hi}
+}
+
+// enoughForLLM — достаточно ли значений для вызова LLM (п. 7: сэмпл <
+// min_values_for_llm или null>0.95 → вызов не делается).
+func (e *Engine) enoughForLLM(pool *sampler.Pool) bool {
+	min := e.cfg.MinValuesForLLM
+	if min <= 0 {
+		min = 3
+	}
+	if len(pool.Values) < min {
+		return false
+	}
+	if pool.Total > 0 && float64(pool.Nulls)/float64(pool.Total) > 0.95 {
+		return false
+	}
+	return true
 }
 
 // newScanID — уникальный id прогона (время + случайность).

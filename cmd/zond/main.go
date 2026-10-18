@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
+	"github.com/DunchikVlad/zond/internal/agentproxy"
 	"github.com/DunchikVlad/zond/internal/analyze/meta"
 	"github.com/DunchikVlad/zond/internal/config"
 	"github.com/DunchikVlad/zond/internal/connector"
@@ -41,6 +43,8 @@ func run(args []string) int {
 		return runConfig(args[1:])
 	case "scan":
 		return runScan(args[1:])
+	case "agent-check":
+		return runAgentCheck(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return 0
@@ -135,6 +139,8 @@ func runScan(args []string) int {
 	}
 	cfg := scanengine.Config{
 		TauAccept:        b.Detectors.Ensemble.TauAccept,
+		TauReview:        b.Detectors.Ensemble.TauReview,
+		Weights:          b.Detectors.Ensemble.Weights,
 		SampleMode:       mode,
 		SampleValue:      b.Detectors.Scan.Sample.Value,
 		MaxRows:          b.Detectors.Scan.Sample.MaxRows,
@@ -143,6 +149,7 @@ func runScan(args []string) int {
 		TaxonomyVersion:  b.Taxonomy.Version,
 		DetectorsVersion: b.Detectors.Version,
 		Sensitivity:      sensitivityMap(b.Taxonomy),
+		TaxonomyLabels:   taxonomyLabels(b.Taxonomy),
 	}
 	eng := scanengine.New(st, meta.New(b.Taxonomy.Synonyms), cfg)
 	rep, err := eng.Scan(context.Background(), conn, src.Name, prof)
@@ -172,9 +179,72 @@ func sensitivityMap(t *config.Taxonomy) map[verdict.Label]verdict.Sensitivity {
 	return out
 }
 
+// taxonomyLabels — имена лейблов для enum промпта LLM (п. 5.3).
+func taxonomyLabels(t *config.Taxonomy) []string {
+	out := make([]string, 0, len(t.Labels))
+	for _, l := range t.Labels {
+		out = append(out, l.Name)
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// agent-check (этап 4: preflight LLM-агентов, blueprint п. 15.3, п. 5.3)
+// ---------------------------------------------------------------------------
+
+func runAgentCheck(args []string) int {
+	fs := flag.NewFlagSet("agent-check", flag.ContinueOnError)
+	dir := fs.String("config", "configs", "каталог с конфигурационными файлами")
+	online := fs.Bool("online", false, "выполнить пробный вызов к эндпоинту (иначе только конфиг+env)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	b, err := config.LoadAll(*dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agent-check: конфигурация: %v\n", err)
+		return 2
+	}
+	labels := taxonomyLabels(b.Taxonomy)
+	failed := 0
+	for _, a := range b.Detectors.Agents {
+		key := os.Getenv(a.APIKeyEnv)
+		if key == "" {
+			fmt.Printf("agent %s: FAIL (env %s не задан)\n", a.ID, a.APIKeyEnv)
+			failed++
+			continue
+		}
+		if !*online {
+			fmt.Printf("agent %s: OK (endpoint=%s model=%s env %s задан; пробный вызов пропущен, -online)\n",
+				a.ID, a.Endpoint, a.Model, a.APIKeyEnv)
+			continue
+		}
+		proxy := agentproxy.New(agentproxy.Agent{
+			ID: a.ID, Endpoint: a.Endpoint, Model: a.Model, APIKey: key,
+			MaxValuesPerCall: a.MaxValuesPerCall, Timeout: time.Duration(a.TimeoutS) * time.Second,
+			MaxRetries: a.MaxRetries,
+		}, labels, b.Taxonomy.Version)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(a.TimeoutS)*time.Second)
+		_, err := proxy.Classify(ctx, "String", []string{"ivan@example.com", "petr@test.io"})
+		cancel()
+		if err != nil {
+			fmt.Printf("agent %s: FAIL (вызов: %v)\n", a.ID, err)
+			failed++
+			continue
+		}
+		fmt.Printf("agent %s: OK (пробный вызов успешен, model=%s)\n", a.ID, a.Model)
+	}
+	if failed > 0 {
+		fmt.Fprintf(os.Stderr, "agent-check: %d агент(ов) не прошли проверку\n", failed)
+		return 1
+	}
+	fmt.Printf("agent-check: все агенты проверены (%d)\n", len(b.Detectors.Agents))
+	return 0
+}
+
 func usage() {
 	fmt.Fprintln(os.Stderr, "использование:")
 	fmt.Fprintln(os.Stderr, "  zond version")
 	fmt.Fprintln(os.Stderr, "  zond config validate [-dir configs]")
 	fmt.Fprintln(os.Stderr, "  zond scan -source <имя> [-config configs] [-db zond.db] [-profile quick|deep|custom]")
+	fmt.Fprintln(os.Stderr, "  zond agent-check [-config configs] [-online]")
 }

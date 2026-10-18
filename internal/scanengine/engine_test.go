@@ -8,6 +8,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/DunchikVlad/zond/internal/agentproxy"
 	"github.com/DunchikVlad/zond/internal/analyze/meta"
 	"github.com/DunchikVlad/zond/internal/connector"
 	"github.com/DunchikVlad/zond/internal/verdict"
@@ -169,7 +170,9 @@ func TestEndToEndScan(t *testing.T) {
 		layer  verdict.EvidenceLayer
 	}{
 		{"users/email", "EMAIL", verdict.StatusAutoAccepted, verdict.LayerEnsemble},
-		{"users/phone", "PHONE", verdict.StatusAutoAccepted, verdict.LayerEnsemble},
+		// phone: 2 валидных из 3 (доля 0.667 → conf 0.70 < tau 0.80) — серая зона;
+		// без LLM (nil) → pending (п. 7 правило 4/5). С LLM — эскалация (тест ниже).
+		{"users/phone", "PHONE", verdict.StatusPending, verdict.LayerEnsemble},
 		{"users/inn", "TAX_ID", verdict.StatusAutoAccepted, verdict.LayerRules},
 		{"users/created_at", "UNKNOWN", verdict.StatusPending, verdict.LayerEnsemble},
 		{"users/amount", "UNKNOWN", verdict.StatusPending, verdict.LayerEnsemble},
@@ -211,6 +214,66 @@ func TestEndToEndScan(t *testing.T) {
 	if stringInAnyMap(vs["users/email"].Evidence, "ivan@example.com") {
 		t.Error("сырое значение попало в evidence — запрещено ADR-0010")
 	}
+}
+
+// fakeLLMClassifier — fake LLM-слой для E2E-теста эскалации (без HTTP).
+type fakeLLMClassifier struct {
+	classifyResult *agentproxy.ClassifyResult
+	classifyErr    error
+	verifyResult   *agentproxy.VerifyResult
+	verifyErr      error
+	classifyCalls  int
+	verifyCalls    int
+}
+
+func (f *fakeLLMClassifier) Classify(ctx context.Context, nativeType string, values []string) (*agentproxy.ClassifyResult, error) {
+	f.classifyCalls++
+	return f.classifyResult, f.classifyErr
+}
+
+func (f *fakeLLMClassifier) Verify(ctx context.Context, candidate, nativeType string, values []string) (*agentproxy.VerifyResult, error) {
+	f.verifyCalls++
+	return f.verifyResult, f.verifyErr
+}
+
+// TestGrayCorridorLLMEscalation — серый коридор phone (0.70 < tau) → LLM
+// вызывается, эскалация в верификатор → auto_accepted (blueprint п. 7).
+func TestGrayCorridorLLMEscalation(t *testing.T) {
+	eng, st := testEngine(t)
+	llm := &fakeLLMClassifier{
+		classifyResult: &agentproxy.ClassifyResult{Label: "PHONE", Confidence: 0.65, Sensitivity: "PII", PromptVersion: "1"},
+		verifyResult:   &agentproxy.VerifyResult{Verdict: "confirm", Label: "PHONE", Confidence: 0.85},
+	}
+	eng.SetLLM(llm)
+	_, vs := scanAndList(t, eng, st, testSource())
+
+	v := vs["users/phone"]
+	if llm.classifyCalls == 0 {
+		t.Error("LLM-классификатор не вызван в сером коридоре")
+	}
+	// после confirm верификатора: confidence+0.1, auto_accepted, слой llm
+	if v.ReviewStatus != verdict.StatusAutoAccepted || v.Label != "PHONE" {
+		t.Errorf("phone после эскалации: label=%s status=%s; ожидалось PHONE/auto_accepted", v.Label, v.ReviewStatus)
+	}
+	if v.PromptVersion != "1" {
+		t.Errorf("prompt_version не проставлен: %+v", v)
+	}
+}
+
+// TestLLMNotCalledForChecksum — checksum (ИНН 0.99) → LLM не вызывается (п. 7 правило 1).
+func TestLLMNotCalledForChecksum(t *testing.T) {
+	eng, st := testEngine(t)
+	llm := &fakeLLMClassifier{
+		classifyResult: &agentproxy.ClassifyResult{Label: "PHONE", Confidence: 0.65, PromptVersion: "1"},
+		verifyResult:   &agentproxy.VerifyResult{Verdict: "confirm", Label: "PHONE", Confidence: 0.85},
+	}
+	eng.SetLLM(llm)
+	_, vs := scanAndList(t, eng, st, testSource())
+	if v := vs["users/inn"]; v.Confidence != 0.99 || v.EvidenceLayer != verdict.LayerRules {
+		t.Errorf("ИНН должен остаться checksum 0.99 rules: %+v", v)
+	}
+	// LLM мог вызваться для phone (серая зона), но не для checksum-колонок;
+	// главное — checksum-вердикты не переопределены
 }
 
 func TestFailedTableDoesNotStopScan(t *testing.T) {

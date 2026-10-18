@@ -23,6 +23,14 @@ linters:
               desc: "domain не зависит от драйверов БД (architecture.md п. 3)"
             - pkg: go.mongodb.org/mongo-driver/**
               desc: "domain не зависит от драйверов БД (architecture.md п. 3)"
+        llm-only-via-agentproxy:
+          files:
+            - $all
+            - "!^internal/agentproxy(/|$)"
+            - "!_test.go$"
+          deny:
+            - pkg: net/http
+              desc: "вызов LLM только через agentproxy (blueprint п. 10.1)"
 
   exclusions:
     presets:
