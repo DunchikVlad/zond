@@ -1,0 +1,36 @@
+# Бинарники артефактов
+/zond
+/classifier
+*.exe
+*.test
+*.out
+
+# Покрытие
+coverage.*
+coverage.html
+
+# SQLite (Verdict Store): файлы БД и журналы WAL
+*.db
+*.db-wal
+*.db-shm
+
+# Секреты и локальное окружение — никогда не коммитить
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Сборка и артефакты релиза
+/bin/
+/dist/
+sbom*.json
