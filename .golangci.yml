@@ -1,0 +1,30 @@
+# golangci-lint v2 (формат конфига — v2, см. CI workflow).
+# Правило depguard закрепляет слои из architecture.md п. 3:
+# domain (verdict, analyze) не импортирует инфраструктуру (HTTP, драйверы БД).
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - depguard
+  settings:
+    depguard:
+      rules:
+        domain-no-infrastructure:
+          files:
+            - "^internal/verdict(/|$)"
+            - "^internal/analyze(/|$)"
+          deny:
+            - pkg: net/http
+              desc: "domain не импортирует HTTP-клиенты (architecture.md п. 3)"
+            - pkg: github.com/ClickHouse/clickhouse-go/v2/**
+              desc: "domain не зависит от драйверов БД (architecture.md п. 3)"
+            - pkg: go.mongodb.org/mongo-driver/**
+              desc: "domain не зависит от драйверов БД (architecture.md п. 3)"
+
+  exclusions:
+    presets:
+      - common-false-positives
+      - std-error-handling
