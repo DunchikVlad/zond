@@ -1,0 +1,31 @@
+# connections.yaml — профили подключений к БД-источникам (ADR-0009).
+# Секретов в файле нет: только ${ENV}-интерполяция (blueprint п. 12).
+# Для проверки без реальных секретов: source configs/ci.env
+version: "1"
+
+sources:
+  # Тестовый контур (docs/progress/2026-10-18-test-environment.md):
+  # БД-источники на 192.168.31.119, пароли стенда — через ENV.
+  - name: ch-test
+    type: clickhouse
+    dsn: "clickhouse://test:${CH_TEST_PASSWORD}@192.168.31.119:9000/default"
+  - name: mongo-test
+    type: mongodb
+    uri: "mongodb://test:${MONGO_TEST_PASSWORD}@192.168.31.119:27017/testdb"
+
+  # Примеры продуктивных подключений (blueprint п. 12) — read-only учётки.
+  - name: ch-prod
+    type: clickhouse
+    dsn: "clickhouse://readonly:${CH_PROD_PASSWORD}@ch-host:9000/analytics"
+  - name: mongo-prod
+    type: mongodb
+    uri: "${MONGO_PROD_URI}"
+
+sso:
+  enabled: false # dev-контур: только admin-токен; IdP-подключение — этап 5 (ADR-0011)
+  entity_id: "https://classifier.example.com/saml/metadata"
+  acs_url: "https://classifier.example.com/saml/acs"
+  idp_metadata_url: "${IDP_METADATA_URL}" # либо idp_metadata_file: ./idp.xml
+  name_id_format: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"
+  role_attribute: "Role"
+  admin_token_fallback: true
