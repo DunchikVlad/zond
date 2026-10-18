@@ -320,8 +320,9 @@ func LoadDetectors(path string) (*Detectors, error) {
 
 // Taxonomy — версионируемый список лейблов и их чувствительности.
 type Taxonomy struct {
-	Version string     `yaml:"version"`
-	Labels  []LabelDef `yaml:"labels"`
+	Version  string              `yaml:"version"`
+	Labels   []LabelDef          `yaml:"labels"`
+	Synonyms map[string][]string `yaml:"synonyms"` // label → токены имён колонок (словарь слоя 0)
 }
 
 // LabelDef — лейбл и класс чувствительности.
@@ -339,6 +340,7 @@ func (t *Taxonomy) Validate() error {
 		errs = append(errs, errors.New("taxonomy: поле version обязательно (semver, ADR-0004)"))
 	}
 	seen := make(map[string]bool, len(t.Labels))
+	labelOK := map[string]bool{}
 	for i, l := range t.Labels {
 		if l.Name == "" {
 			errs = append(errs, fmt.Errorf("labels[%d]: name обязателен", i))
@@ -346,8 +348,14 @@ func (t *Taxonomy) Validate() error {
 			errs = append(errs, fmt.Errorf("labels[%d]: дубль лейбла %q", i, l.Name))
 		}
 		seen[l.Name] = true
+		labelOK[l.Name] = true
 		if !slices.Contains(sensitivities, l.Sensitivity) {
 			errs = append(errs, fmt.Errorf("labels[%d] (%s): sensitivity допустимы %v, получено %q", i, l.Name, sensitivities, l.Sensitivity))
+		}
+	}
+	for label := range t.Synonyms {
+		if !labelOK[label] {
+			errs = append(errs, fmt.Errorf("synonyms: лейбл %q отсутствует в labels", label))
 		}
 	}
 	return errors.Join(errs...)
