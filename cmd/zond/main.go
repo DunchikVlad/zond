@@ -4,20 +4,29 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/DunchikVlad/zond/internal/agentproxy"
 	"github.com/DunchikVlad/zond/internal/analyze/meta"
+	"github.com/DunchikVlad/zond/internal/api"
 	"github.com/DunchikVlad/zond/internal/audit"
 	"github.com/DunchikVlad/zond/internal/config"
 	"github.com/DunchikVlad/zond/internal/connector"
 	_ "github.com/DunchikVlad/zond/internal/connector/clickhouse" // регистрация по конвенции путей
 	_ "github.com/DunchikVlad/zond/internal/connector/mongodb"    // регистрация по конвенции путей
+	"github.com/DunchikVlad/zond/internal/logging"
 	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/verdict"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
@@ -50,6 +59,8 @@ func run(args []string) int {
 		return runAgentCheck(args[1:])
 	case "audit":
 		return runAudit(args[1:])
+	case "serve":
+		return runServe(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return 0
@@ -139,6 +150,29 @@ func runScan(args []string) int {
 	if prof == "" {
 		prof = b.Detectors.Scan.Profile
 	}
+	cfg := engineConfig(b)
+	eng := scanengine.New(st, meta.New(b.Taxonomy.Synonyms), cfg)
+	if *useLLM {
+		comp, id, err := buildLLMComposite(b, taxonomyLabels(b.Taxonomy))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "scan -llm:", err)
+			return 2
+		}
+		eng.SetLLM(comp, id)
+	}
+	rep, err := eng.Scan(context.Background(), conn, src.Name, prof)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scan: %v\n", err)
+		rep.Text(os.Stdout)
+		return 1
+	}
+	rep.Text(os.Stdout)
+	return 0
+}
+
+// engineConfig собирает scanengine.Config из bundle конфигурации
+// (общая точка для CLI `scan` и serve-runner'а, инкремент 5б).
+func engineConfig(b *config.Bundle) scanengine.Config {
 	mode := connector.SamplePercent
 	if b.Detectors.Scan.Sample.Mode == "rows" {
 		mode = connector.SampleRows
@@ -165,23 +199,7 @@ func runScan(args []string) int {
 		// идентичность агента для ключа кэша вердиктов (п. 10.5)
 		cfg.CacheScope = b.Detectors.Agents[0].ID + "|" + b.Detectors.Agents[0].Model
 	}
-	eng := scanengine.New(st, meta.New(b.Taxonomy.Synonyms), cfg)
-	if *useLLM {
-		comp, id, err := buildLLMComposite(b, taxonomyLabels(b.Taxonomy))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "scan -llm:", err)
-			return 2
-		}
-		eng.SetLLM(comp, id)
-	}
-	rep, err := eng.Scan(context.Background(), conn, src.Name, prof)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "scan: %v\n", err)
-		rep.Text(os.Stdout)
-		return 1
-	}
-	rep.Text(os.Stdout)
-	return 0
+	return cfg
 }
 
 func findSource(c *config.Connections, name string) (*config.Source, error) {
@@ -277,6 +295,179 @@ func taxonomyLabels(t *config.Taxonomy) []string {
 		out = append(out, l.Name)
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// serve (инкремент 5б, blueprint п. 11.2): REST API поверх Verdict Store.
+// Аутентификация — инкремент 5в (SSO); до неё actor="api" и listen-адрес по
+// умолчанию только loopback (ADR-impl-5б).
+// ---------------------------------------------------------------------------
+
+// engineRunner — api.ScanRunner поверх scanengine: асинхронные прогоны с
+// мягкой остановкой через ctx (п. 11.2). Resource governance этапа 5:
+// один активный прогон на источник (п. 13.2; per-source caps).
+type engineRunner struct {
+	b      *config.Bundle
+	st     *store.Store
+	log    *slog.Logger
+	useLLM bool
+
+	mu      sync.Mutex
+	running map[string]context.CancelFunc // scan_id → cancel
+	sources map[string]bool               // источник занят активным прогоном
+}
+
+func newEngineRunner(b *config.Bundle, st *store.Store, log *slog.Logger, useLLM bool) *engineRunner {
+	return &engineRunner{
+		b: b, st: st, log: log, useLLM: useLLM,
+		running: map[string]context.CancelFunc{}, sources: map[string]bool{},
+	}
+}
+
+// Start запускает прогон в фоне и возвращает scan_id сразу (п. 11.2 POST
+// /scans → {scan_id}). Источник/профиль/подключение валидируются до старта —
+// клиент получает осмысленную ошибку, а не «прогон умер в фоне».
+func (r *engineRunner) Start(source, profile string) (string, error) {
+	src, err := findSource(r.b.Connections, source)
+	if err != nil {
+		return "", &api.BadScanRequestError{Reason: err.Error()}
+	}
+	if profile == "" {
+		profile = r.b.Detectors.Scan.Profile
+	}
+	factory, ok := connector.Lookup(src.Type)
+	if !ok {
+		return "", &api.BadScanRequestError{Reason: fmt.Sprintf("коннектор %q не зарегистрирован", src.Type)}
+	}
+	dsn := src.DSN
+	if dsn == "" {
+		dsn = src.URI
+	}
+	conn, err := factory(dsn)
+	if err != nil {
+		return "", &api.SourceUnavailableError{Reason: fmt.Sprintf("источник %q: %v", source, err)}
+	}
+	if err := conn.Ping(context.Background()); err != nil {
+		conn.Close()
+		return "", &api.SourceUnavailableError{Reason: fmt.Sprintf("источник %q: %v", source, err)}
+	}
+
+	// LLM-слой собирается fail-fast до регистрации прогона (как `scan -llm`).
+	var llm scanengine.LLMClassifier
+	var llmID scanengine.LLMIdentity
+	if r.useLLM {
+		llm, llmID, err = buildLLMComposite(r.b, taxonomyLabels(r.b.Taxonomy))
+		if err != nil {
+			conn.Close()
+			return "", &api.SourceUnavailableError{Reason: fmt.Sprintf("llm-слой: %v", err)}
+		}
+	}
+
+	scanID := newAPIScanID()
+	ctx, cancel := context.WithCancel(context.Background())
+	r.mu.Lock()
+	if r.sources[source] {
+		r.mu.Unlock()
+		cancel()
+		conn.Close()
+		return "", &api.SourceUnavailableError{
+			Reason: fmt.Sprintf("источник %q уже сканируется (1 активный прогон на источник, п. 13.2)", source),
+		}
+	}
+	r.running[scanID] = cancel
+	r.sources[source] = true
+	r.mu.Unlock()
+
+	go func() {
+		defer func() {
+			r.mu.Lock()
+			delete(r.running, scanID)
+			delete(r.sources, source)
+			r.mu.Unlock()
+			conn.Close()
+		}()
+		cfg := engineConfig(r.b)
+		cfg.Actor = api.Actor // п. 14.2: до SSO прогоны API аудируются как "api"
+		eng := scanengine.New(r.st, meta.New(r.b.Taxonomy.Synonyms), cfg)
+		if llm != nil {
+			eng.SetLLM(llm, llmID)
+		}
+		rep, err := eng.ScanWithID(ctx, conn, source, profile, scanID)
+		if err != nil {
+			r.log.Error("serve: прогон завершился ошибкой", "scan_id", scanID, "error", err)
+			return
+		}
+		r.log.Info("serve: прогон завершён", "scan_id", scanID, "status", rep.Status)
+	}()
+	return scanID, nil
+}
+
+// Stop мягко останавливает прогон (отмена ctx; движок фиксирует interrupted,
+// п. 11.2). Неизвестный/уже завершённый прогон — ошибка (API → 409).
+func (r *engineRunner) Stop(scanID string) error {
+	r.mu.Lock()
+	cancel, ok := r.running[scanID]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("прогон %s не исполняется на этом сервере", scanID)
+	}
+	cancel()
+	return nil
+}
+
+// newAPIScanID — идентификатор прогона API (тот же формат, что в движке:
+// unix-hex; движок принимает id через ScanWithID).
+func newAPIScanID() string {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("%d-%s", time.Now().Unix(), hex.EncodeToString(b[:]))
+}
+
+func runServe(args []string) int {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	dir := fs.String("config", "configs", "каталог с конфигурационными файлами")
+	dbPath := fs.String("db", "zond.db", "файл Verdict Store (SQLite)")
+	addr := fs.String("addr", "127.0.0.1:8080", "адрес HTTP-сервера (до SSO — только loopback, ADR-impl-5б)")
+	exportMax := fs.Int("export-max-rows", 50000, "лимит строк экспорта (п. 11.2)")
+	useLLM := fs.Bool("llm", false, "подключить LLM-слой при старте сканов через API")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	log := logging.New(os.Stderr, "info")
+	b, err := config.LoadAll(*dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "serve: конфигурация: %v\n", err)
+		return 2
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "serve: verdict store: %v\n", err)
+		return 2
+	}
+	defer st.Close()
+
+	runner := newEngineRunner(b, st, log, *useLLM)
+	srv := api.New(st, log, api.WithRunner(runner), api.WithExportMaxRows(*exportMax))
+	httpSrv := &http.Server{
+		Addr:              *addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-ch
+		log.Info("serve: остановка", "signal", sig.String())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpSrv.Shutdown(ctx)
+	}()
+	log.Info("serve: старт", "addr", *addr, "db", *dbPath, "llm", *useLLM)
+	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // ---------------------------------------------------------------------------
@@ -462,4 +653,5 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  zond agent-check [-config configs] [-online]")
 	fmt.Fprintln(os.Stderr, "  zond audit verify [-db zond.db]")
 	fmt.Fprintln(os.Stderr, "  zond audit export [-db zond.db] [-actor x] [-category y] [-since RFC3339] [-scan id] [-out file]")
+	fmt.Fprintln(os.Stderr, "  zond serve [-config configs] [-db zond.db] [-addr 127.0.0.1:8080] [-export-max-rows 50000] [-llm]")
 }

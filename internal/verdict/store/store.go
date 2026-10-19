@@ -60,6 +60,9 @@ func Open(path string) (*Store, error) {
 // Close закрывает БД.
 func (s *Store) Close() error { return s.db.Close() }
 
+// Ping проверяет доступность БД (readiness API, п. 11.2 /api/ready).
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
 // ---------------------------------------------------------------------------
 // scans / scan_tables — чекпоинты прогона (blueprint п. 13)
 // ---------------------------------------------------------------------------

@@ -193,7 +193,13 @@ func joinSorted(m map[string]int) string {
 // Scan выполняет полный прогон по источнику (blueprint п. 13):
 // недоступная таблица помечается failed и не роняет скан (п. 6).
 func (e *Engine) Scan(ctx context.Context, conn connector.Connector, sourceName, profile string) (*Report, error) {
-	scanID := newScanID(e.nowFn())
+	return e.ScanWithID(ctx, conn, sourceName, profile, newScanID(e.nowFn()))
+}
+
+// ScanWithID — Scan с заранее заданным идентификатором прогона. Нужен
+// REST API (инкремент 5б, blueprint п. 11.2): POST /scans обязан вернуть
+// scan_id до завершения асинхронного прогона. CLI использует Scan.
+func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourceName, profile, scanID string) (*Report, error) {
 	rep := &Report{
 		ScanID:    scanID,
 		Source:    sourceName,
@@ -236,7 +242,14 @@ func (e *Engine) Scan(ctx context.Context, conn connector.Connector, sourceName,
 	}
 	rep.TablesTotal = len(tables)
 
+	interrupted := false
 	for _, t := range tables {
+		// Мягкая остановка (п. 11.2 stop, п. 13): отмена ctx между таблицами —
+		// прогон фиксируется interrupted с чекпоинтами обработанных таблиц.
+		if ctx.Err() != nil {
+			interrupted = true
+			break
+		}
 		if err := e.scanTable(ctx, conn, scanID, t, rep); err != nil {
 			// ошибка уже записана в scan_tables; продолжаем остальные таблицы
 			rep.TablesFailed++
@@ -249,6 +262,9 @@ func (e *Engine) Scan(ctx context.Context, conn connector.Connector, sourceName,
 	if rep.TablesFailed > 0 {
 		status = "partial"
 	}
+	if interrupted {
+		status = "interrupted" // stop приоритетнее done/partial
+	}
 	if e.budgetExceeded {
 		status = "budget_exceeded" // budget-стоп приоритетнее done/partial (п. 10.4)
 	}
@@ -259,10 +275,14 @@ func (e *Engine) Scan(ctx context.Context, conn connector.Connector, sourceName,
 	rep.TokensIn = e.stats.tokensIn
 	rep.TokensOut = e.stats.tokensOut
 	rep.CostUSD = e.cost
-	if err := e.aggregate(ctx, rep); err != nil {
+	// Финализация (агрегаты, stats_json, аудит scan_finish) идёт даже при
+	// отменённом ctx — WithoutCancel отвязывает от отмены, иначе interrupted-
+	// прогон останется «вечным» running (п. 13, п. 11.2 stop).
+	fin := context.WithoutCancel(ctx)
+	if err := e.aggregate(fin, rep); err != nil {
 		return rep, err
 	}
-	if err := e.finish(ctx, rep, status); err != nil {
+	if err := e.finish(fin, rep, status); err != nil {
 		return rep, err
 	}
 	return rep, nil
