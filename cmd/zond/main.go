@@ -138,18 +138,25 @@ func runScan(args []string) int {
 		mode = connector.SampleRows
 	}
 	cfg := scanengine.Config{
-		TauAccept:        b.Detectors.Ensemble.TauAccept,
-		TauReview:        b.Detectors.Ensemble.TauReview,
-		Weights:          b.Detectors.Ensemble.Weights,
-		SampleMode:       mode,
-		SampleValue:      b.Detectors.Scan.Sample.Value,
-		MaxRows:          b.Detectors.Scan.Sample.MaxRows,
-		MaxStringChars:   b.Detectors.Scan.Sample.MaxStringChars,
-		Dedup:            b.Detectors.Scan.Sample.DedupValues,
-		TaxonomyVersion:  b.Taxonomy.Version,
-		DetectorsVersion: b.Detectors.Version,
-		Sensitivity:      sensitivityMap(b.Taxonomy),
-		TaxonomyLabels:   taxonomyLabels(b.Taxonomy),
+		TauAccept:         b.Detectors.Ensemble.TauAccept,
+		TauReview:         b.Detectors.Ensemble.TauReview,
+		Weights:           b.Detectors.Ensemble.Weights,
+		SampleMode:        mode,
+		SampleValue:       b.Detectors.Scan.Sample.Value,
+		MaxRows:           b.Detectors.Scan.Sample.MaxRows,
+		MaxStringChars:    b.Detectors.Scan.Sample.MaxStringChars,
+		Dedup:             b.Detectors.Scan.Sample.DedupValues,
+		TaxonomyVersion:   b.Taxonomy.Version,
+		DetectorsVersion:  b.Detectors.Version,
+		Sensitivity:       sensitivityMap(b.Taxonomy),
+		TaxonomyLabels:    taxonomyLabels(b.Taxonomy),
+		Clustering:        true, // п. 7.6
+		ClusterSimilarity: b.Detectors.Cluster.Similarity,
+		ClusterMaxSize:    b.Detectors.Cluster.MaxSize,
+	}
+	if len(b.Detectors.Agents) > 0 {
+		// идентичность агента для ключа кэша вердиктов (п. 10.5)
+		cfg.CacheScope = b.Detectors.Agents[0].ID + "|" + b.Detectors.Agents[0].Model
 	}
 	eng := scanengine.New(st, meta.New(b.Taxonomy.Synonyms), cfg)
 	rep, err := eng.Scan(context.Background(), conn, src.Name, prof)

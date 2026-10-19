@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -16,10 +17,14 @@ import (
 	"time"
 
 	"github.com/DunchikVlad/zond/internal/agentproxy"
+	"github.com/DunchikVlad/zond/internal/agentproxy/mask"
+	"github.com/DunchikVlad/zond/internal/agentproxy/prompts"
+	"github.com/DunchikVlad/zond/internal/analyze/cluster"
 	"github.com/DunchikVlad/zond/internal/analyze/meta"
 	"github.com/DunchikVlad/zond/internal/analyze/rules"
 	"github.com/DunchikVlad/zond/internal/connector"
 	"github.com/DunchikVlad/zond/internal/ensemble"
+	"github.com/DunchikVlad/zond/internal/fingerprint"
 	"github.com/DunchikVlad/zond/internal/sampler"
 	"github.com/DunchikVlad/zond/internal/verdict"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
@@ -41,6 +46,12 @@ type Config struct {
 	DetectorsVersion string
 	Sensitivity      map[verdict.Label]verdict.Sensitivity
 	TaxonomyLabels   []string // enum лейблов для промпта LLM
+
+	// Инкремент 4б: кэш вердиктов (п. 10.5) и кластеризация (п. 7.6).
+	CacheScope        string // "agent_id|model" — идентичность агента в ключе кэша; "" → кэш выключен
+	Clustering        bool   // кластеризация колонок до слоя 2
+	ClusterSimilarity float64
+	ClusterMaxSize    int
 }
 
 // LLMClassifier — минимальный интерфейс LLM-слоя для движка (п. 7).
@@ -52,12 +63,21 @@ type LLMClassifier interface {
 
 // Engine — движок сканирования одного источника.
 type Engine struct {
-	st    *store.Store
-	meta  *meta.Analyzer
-	recs  []rules.Recognizer
-	llm   LLMClassifier // nil → слой 2 (LLM) отключён
-	cfg   Config
-	nowFn func() time.Time
+	st        *store.Store
+	meta      *meta.Analyzer
+	recs      []rules.Recognizer
+	llm       LLMClassifier // nil → слой 2 (LLM) отключён
+	cfg       Config
+	nowFn     func() time.Time
+	clusterer *cluster.Clusterer // на скан (п. 7.6); nil — кластеризация выключена
+	stats     scanStats          // счётчики экономики текущего прогона
+}
+
+// scanStats — счётчики экономики сканирования (blueprint п. 17).
+type scanStats struct {
+	llmCalls   int // реальные вызовы LLM
+	cacheHits  int // вердикты из кэша (п. 10.5)
+	propagated int // вердикты из кластера (п. 7.6)
 }
 
 // New собирает движок: recognizer'ы слоя 1 по умолчанию (rules.Default).
@@ -70,21 +90,24 @@ func (e *Engine) SetLLM(llm LLMClassifier) { e.llm = llm }
 
 // Report — итог прогона (консольный отчёт этапа 1).
 type Report struct {
-	ScanID       string
-	Source       string
-	Profile      string
-	Status       string
-	StartedAt    time.Time
-	FinishedAt   time.Time
-	TablesTotal  int
-	TablesDone   int
-	TablesFailed int
-	Verdicts     int
-	Pending      int
-	ByLabel      map[string]int
-	ByLayer      map[string]int
-	ByStatus     map[string]int
-	Errors       []string
+	ScanID            string
+	Source            string
+	Profile           string
+	Status            string
+	StartedAt         time.Time
+	FinishedAt        time.Time
+	TablesTotal       int
+	TablesDone        int
+	TablesFailed      int
+	Verdicts          int
+	Pending           int
+	ByLabel           map[string]int
+	ByLayer           map[string]int
+	ByStatus          map[string]int
+	LLMCalls          int // экономика: реальные вызовы LLM (п. 17)
+	CacheHits         int // вердикты из кэша (п. 10.5)
+	ClusterPropagated int // вердикты из кластеров (п. 7.6)
+	Errors            []string
 }
 
 // Text печатает человекочитаемый отчёт.
@@ -95,6 +118,10 @@ func (r *Report) Text(w io.Writer) {
 	fmt.Fprintf(w, "Вердикты: %d (ожидают ревью: %d)\n", r.Verdicts, r.Pending)
 	fmt.Fprintf(w, "По слоям: %s\n", joinSorted(r.ByLayer))
 	fmt.Fprintf(w, "По лейблам: %s\n", joinSorted(r.ByLabel))
+	if r.LLMCalls+r.CacheHits+r.ClusterPropagated > 0 {
+		fmt.Fprintf(w, "Экономика: LLM-вызовов %d, из кэша %d, из кластеров %d\n",
+			r.LLMCalls, r.CacheHits, r.ClusterPropagated)
+	}
 	if len(r.Errors) > 0 {
 		fmt.Fprintf(w, "Ошибки таблиц:\n")
 		for _, e := range r.Errors {
@@ -136,6 +163,12 @@ func (e *Engine) Scan(ctx context.Context, conn connector.Connector, sourceName,
 	}); err != nil {
 		return nil, fmt.Errorf("создание прогона: %w", err)
 	}
+	if e.cfg.Clustering {
+		e.clusterer = cluster.New(e.cfg.ClusterSimilarity, e.cfg.ClusterMaxSize)
+	} else {
+		e.clusterer = nil
+	}
+	e.stats = scanStats{}
 
 	tables, err := conn.ListTables(ctx)
 	if err != nil {
@@ -157,6 +190,9 @@ func (e *Engine) Scan(ctx context.Context, conn connector.Connector, sourceName,
 	if rep.TablesFailed > 0 {
 		status = "partial"
 	}
+	rep.LLMCalls = e.stats.llmCalls
+	rep.CacheHits = e.stats.cacheHits
+	rep.ClusterPropagated = e.stats.propagated
 	if err := e.aggregate(ctx, rep); err != nil {
 		return rep, err
 	}
@@ -171,6 +207,8 @@ func (e *Engine) finish(ctx context.Context, rep *Report, status string) {
 		"tables_total": rep.TablesTotal, "tables_done": rep.TablesDone,
 		"tables_failed": rep.TablesFailed, "verdicts": rep.Verdicts,
 		"by_layer": rep.ByLayer, "by_label": rep.ByLabel,
+		"llm_calls": rep.LLMCalls, "cache_hits": rep.CacheHits,
+		"cluster_propagated": rep.ClusterPropagated,
 	})
 	_ = e.st.FinishScan(ctx, rep.ScanID, status, string(stats), rep.FinishedAt)
 }
@@ -274,6 +312,32 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 		}
 	}
 
+	// Кластеризация до слоя 2 (п. 7.6): отпечаток по маскированным значениям;
+	// член кластера с известным вердиктом представителя получает его копию.
+	maskedVals := maskedForFingerprint(pool.Values)
+	feat := fingerprint.Compute(col.NativeType, maskedVals, pool.Total, pool.Nulls)
+	v.ClusterID = ""
+	propagated := false
+	if e.clusterer != nil {
+		if id, ok := e.clusterer.Find(feat); ok {
+			v.ClusterID = id
+			if pv, ok := e.clusterer.Verdict(id); ok {
+				applyClusterVerdict(&v, pv)
+				propagated = true
+				e.stats.propagated++
+			} else {
+				e.clusterer.Attach(id)
+			}
+		} else {
+			v.ClusterID = e.clusterer.Register(feat)
+		}
+	}
+	if propagated {
+		e.finalizeVerdict(&v, pool, evRules)
+		v.Evidence["cluster_propagated"] = true
+		return v
+	}
+
 	// слой 2 (LLM) — только серый коридор и достаточный сэмпл (п. 7);
 	// small_sample или null>0.95 → вызов не делается.
 	gray := e.grayBand()
@@ -283,10 +347,10 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 	}
 	out := ensemble.Decide(cands, e.cfg.TauAccept, weights, gray)
 
-	// серый коридор: вызов LLM-классификатора (этап 4), затем эскалация.
+	// серый коридор: вызов LLM-классификатора (этап 4) с кэшем вердиктов
+	// (п. 10.5), затем эскалация в верификатор.
 	if e.llm != nil && out.Escalate && e.enoughForLLM(pool) {
-		if res, err := e.llm.Classify(ctx, col.NativeType, pool.Values); err == nil && res != nil {
-			v.PromptVersion = res.PromptVersion
+		if res := e.llmClassify(ctx, col, pool, maskedVals, &v); res != nil {
 			cands = append(cands, ensemble.Candidate{Label: verdict.Label(res.Label), Confidence: res.Confidence, Layer: verdict.LayerLLM})
 			out = ensemble.Decide(cands, e.cfg.TauAccept, weights, gray)
 		}
@@ -303,19 +367,137 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 	v.Confidence = out.Confidence
 	v.EvidenceLayer = out.Layer
 	v.ReviewStatus = out.ReviewStatus
-	if s, ok := e.cfg.Sensitivity[out.Label]; ok {
+	e.finalizeVerdict(&v, pool, evRules)
+	if v.ClusterID != "" && e.clusterer != nil {
+		// вердикт представителя — источник для распространения (п. 7.6)
+		e.clusterer.SetVerdict(v.ClusterID, cluster.VerdictView{
+			Label: string(v.Label), Confidence: v.Confidence,
+			Layer: string(v.EvidenceLayer), ReviewStatus: string(v.ReviewStatus),
+		})
+	}
+	return v
+}
+
+// finalizeVerdict — общий хвост: sensitivity из таксономии, evidence,
+// жёсткие правила small_sample (п. 6, п. 7). Evidence уже может содержать
+// записи (llm_cache) — пополняется, не пересоздаётся.
+func (e *Engine) finalizeVerdict(v *verdict.Verdict, pool *sampler.Pool, evRules map[string]any) {
+	if s, ok := e.cfg.Sensitivity[v.Label]; ok {
 		v.Sensitivity = s
 	}
-	v.Evidence = map[string]any{
-		"rules":  evRules,
-		"sample": map[string]any{"values": len(pool.Values), "nulls": pool.Nulls, "total": pool.Total, "skipped": pool.Skipped},
+	if v.Evidence == nil {
+		v.Evidence = map[string]any{}
 	}
+	v.Evidence["rules"] = evRules
+	v.Evidence["sample"] = map[string]any{"values": len(pool.Values), "nulls": pool.Nulls, "total": pool.Total, "skipped": pool.Skipped}
 	if len(pool.Values) == 0 || (pool.Total > 0 && float64(pool.Nulls)/float64(pool.Total) > 0.95) {
 		v.Label = verdict.Label("UNKNOWN")
 		v.ReviewStatus = verdict.StatusPending
 		v.Evidence["reason"] = "small_sample"
 	}
-	return v
+}
+
+// applyClusterVerdict переносит вердикт представителя на члена кластера (п. 7.6).
+func applyClusterVerdict(v *verdict.Verdict, pv cluster.VerdictView) {
+	v.Label = verdict.Label(pv.Label)
+	v.Confidence = pv.Confidence
+	v.EvidenceLayer = verdict.EvidenceLayer(pv.Layer)
+	v.ReviewStatus = verdict.ReviewStatus(pv.ReviewStatus)
+}
+
+// maskedForFingerprint маскирует значения пула для отпечатка (п. 7.6:
+// префикс/суффикс — по маскированным значениям). Короткие (< MinLen) → "".
+func maskedForFingerprint(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if m, ok := mask.Mask(v); ok {
+			out = append(out, m)
+		} else {
+			out = append(out, "")
+		}
+	}
+	return out
+}
+
+// cachedLLMVerdict — JSON-представление ответа классификатора в кэше (п. 10.5).
+// Только лейбл/уверенность/версия промпта — без значений (ADR-0010).
+type cachedLLMVerdict struct {
+	Label         string  `json:"label"`
+	Confidence    float64 `json:"confidence"`
+	PromptVersion string  `json:"prompt_version"`
+}
+
+// llmClassify вызывает LLM-классификатора с кэшем вердиктов (п. 10.5): при
+// промахе — вызов и запись в кэш (TTL CacheTTLDefault), при попадании —
+// вердикт без сетевого обращения. Возвращает nil при ошибке вызова.
+func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sampler.Pool, maskedVals []string, v *verdict.Verdict) *agentproxy.ClassifyResult {
+	cacheKey := ""
+	if e.cfg.CacheScope != "" {
+		cacheKey = llmCacheKey(e.cfg.CacheScope, e.cfg.TaxonomyVersion, fingerprint.ValuesHash(maskedVals))
+		if cv, ok, err := e.st.CacheGet(ctx, cacheKey, e.nowFn()); err == nil && ok {
+			if cached, err := decodeCachedVerdict(cv.VerdictJSON); err == nil {
+				e.stats.cacheHits++
+				setLLMCacheEvidence(v, cv.AgentID, true)
+				return cached
+			}
+		}
+	}
+	res, err := e.llm.Classify(ctx, col.NativeType, pool.Values)
+	if err != nil || res == nil {
+		return nil
+	}
+	e.stats.llmCalls++
+	v.PromptVersion = res.PromptVersion
+	if cacheKey != "" {
+		if b, mErr := json.Marshal(cachedLLMVerdict{
+			Label: res.Label, Confidence: res.Confidence, PromptVersion: res.PromptVersion,
+		}); mErr == nil {
+			now := e.nowFn()
+			_ = e.st.CachePut(ctx, cacheKey, store.CachedVerdict{
+				AgentID:     cacheAgentID(e.cfg.CacheScope),
+				VerdictJSON: string(b),
+				CreatedAt:   now,
+				ExpiresAt:   now.Add(store.CacheTTLDefault),
+			})
+		}
+		setLLMCacheEvidence(v, cacheAgentID(e.cfg.CacheScope), false)
+	}
+	return res
+}
+
+func setLLMCacheEvidence(v *verdict.Verdict, agentID string, hit bool) {
+	if v.Evidence == nil {
+		v.Evidence = map[string]any{}
+	}
+	v.Evidence["llm_cache"] = map[string]any{"hit": hit, "agent_id": agentID}
+}
+
+func decodeCachedVerdict(s string) (*agentproxy.ClassifyResult, error) {
+	var cv cachedLLMVerdict
+	if err := json.Unmarshal([]byte(s), &cv); err != nil {
+		return nil, err
+	}
+	return &agentproxy.ClassifyResult{
+		Label: cv.Label, Confidence: cv.Confidence, PromptVersion: cv.PromptVersion,
+	}, nil
+}
+
+// llmCacheKey — составной ключ кэша (blueprint п. 10.5):
+// sha256(agent_id | model | prompt_version | taxonomy_version |
+// mask_profile_version | fingerprint(values)).
+func llmCacheKey(scope, taxonomyVersion, valuesHash string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		"llm-classify", scope, prompts.Version, taxonomyVersion, mask.Version, valuesHash,
+	}, "|")))
+	return hex.EncodeToString(sum[:])
+}
+
+// cacheAgentID — часть CacheScope до '|' (agent_id для записи кэша).
+func cacheAgentID(scope string) string {
+	if i := strings.IndexByte(scope, '|'); i >= 0 {
+		return scope[:i]
+	}
+	return scope
 }
 
 // grayBand — серая зона confidence для LLM/эскалации (confidence_band агента).

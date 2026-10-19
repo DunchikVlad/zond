@@ -195,6 +195,13 @@ type Detectors struct {
 	Scan     ScanConfig     `yaml:"scan"`
 	Ensemble EnsembleConfig `yaml:"ensemble"`
 	Agents   []AgentSpec    `yaml:"agents"`
+	Cluster  ClusterConfig  `yaml:"cluster"` // п. 7.6
+}
+
+// ClusterConfig — кластеризация колонок по отпечатку (blueprint п. 7.6).
+type ClusterConfig struct {
+	Similarity float64 `yaml:"similarity"` // порх сходства (0,1], default 0.8
+	MaxSize    int     `yaml:"max_size"`   // размер кластера, default 100
 }
 
 // ScanConfig — профиль и параметры сэмплирования (blueprint п. 5.2).
@@ -298,6 +305,12 @@ func (d *Detectors) Validate() error {
 		if a.EscalateTo != "" && !ids[a.EscalateTo] {
 			errs = append(errs, fmt.Errorf("agents[%d] (%s): escalate_to=%q не найден в реестре", i, a.ID, a.EscalateTo))
 		}
+	}
+	if d.Cluster.Similarity != 0 && (d.Cluster.Similarity <= 0 || d.Cluster.Similarity > 1) {
+		errs = append(errs, fmt.Errorf("cluster.similarity должен быть в (0, 1], получено %v", d.Cluster.Similarity))
+	}
+	if d.Cluster.MaxSize < 0 {
+		errs = append(errs, fmt.Errorf("cluster.max_size должен быть >= 0 (0 = default 100)"))
 	}
 	return errors.Join(errs...)
 }

@@ -21,6 +21,10 @@ ensemble:
     rules: 1.5
     llm: 1.2
 
+cluster:
+  similarity: 0.80 # п. 7.6: совпадение типа и >=80% признаков отпечатка
+  max_size: 100 # транзитивное замыкание ограничено
+
 agents:
   - id: zond-main
     endpoint: https://api.example/v1/chat
