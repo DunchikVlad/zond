@@ -44,7 +44,7 @@ func TestClusterPropagation(t *testing.T) {
 	cfg.Clustering = true
 	eng = New(st, eng.meta, cfg)
 	llm := llmWithAnswer()
-	eng.SetLLM(llm)
+	eng.SetLLM(llm, LLMIdentity{AgentID: "zond-main", Model: "gpt-4o-mini"})
 
 	rep, vs := scanAndList(t, eng, st, grayPhoneSource())
 	if rep.ClusterPropagated != 1 {
@@ -83,7 +83,7 @@ func TestVerdictCacheAcrossScans(t *testing.T) {
 	cfg.CacheScope = "zond-main|gpt-4o-mini"
 	eng = New(st, eng.meta, cfg)
 	llm := llmWithAnswer()
-	eng.SetLLM(llm)
+	eng.SetLLM(llm, LLMIdentity{AgentID: "zond-main", Model: "gpt-4o-mini"})
 
 	rep1, _ := scanAndList(t, eng, st, grayPhoneSource())
 	if llm.classifyCalls != 1 || rep1.CacheHits != 0 {
@@ -107,7 +107,7 @@ func TestVerdictCacheAcrossScans(t *testing.T) {
 func TestClusteringDisabledByDefault(t *testing.T) {
 	eng, st := testEngine(t)
 	llm := llmWithAnswer()
-	eng.SetLLM(llm)
+	eng.SetLLM(llm, LLMIdentity{AgentID: "zond-main", Model: "gpt-4o-mini"})
 	rep, vs := scanAndList(t, eng, st, grayPhoneSource())
 	if rep.ClusterPropagated != 0 {
 		t.Fatalf("propagated без Clustering: %+v", rep)

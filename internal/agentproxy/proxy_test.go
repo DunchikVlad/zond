@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/DunchikVlad/zond/internal/agentproxy/prompts"
 )
@@ -27,10 +28,17 @@ type fakeLLM struct {
 	bodies []string
 	// answer — JSON-строка, которую возвращает агент.
 	answer string
+	// usage — токены ответа (п. 10.6); nil — агент токены не возвращает.
+	usage map[string]any
 	// calls — счётчик вызовов (для ретраев).
 	calls int
 	// failFirst — сколько первых вызовов вернуть невалидный ответ (ретрай п. 6).
 	failFirst int
+	// delay — задержка перед ответом (тест семафора п. 10.4).
+	delay time.Duration
+	// maxConcurrent / curConcurrent — учёт пиковой конкурентности в handler'е.
+	curConcurrent int
+	maxConcurrent int
 }
 
 func newFakeLLM(t *testing.T, answer string) *fakeLLM {
@@ -46,7 +54,15 @@ func (f *fakeLLM) handle(w http.ResponseWriter, r *http.Request) {
 	f.bodies = append(f.bodies, string(body))
 	f.calls++
 	fail := f.calls <= f.failFirst
+	f.curConcurrent++
+	if f.curConcurrent > f.maxConcurrent {
+		f.maxConcurrent = f.curConcurrent
+	}
+	delay := f.delay
 	f.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	content := f.answer
 	if fail {
@@ -57,7 +73,15 @@ func (f *fakeLLM) handle(w http.ResponseWriter, r *http.Request) {
 			{"message": map[string]string{"role": "assistant", "content": content}},
 		},
 	}
+	f.mu.Lock()
+	if f.usage != nil {
+		resp["usage"] = f.usage
+	}
+	f.mu.Unlock()
 	_ = json.NewEncoder(w).Encode(resp)
+	f.mu.Lock()
+	f.curConcurrent--
+	f.mu.Unlock()
 }
 
 func (f *fakeLLM) url() string { return f.srv.URL }
@@ -66,11 +90,21 @@ func testAgent(url string) Agent {
 	return Agent{ID: "zond-main", Endpoint: url, Model: "gpt-4o-mini", MaxValuesPerCall: 25, MaxRetries: 2}
 }
 
+// mustNew — конструктор прокси для тестов: ошибка конструирования = Fatal.
+func mustNew(t *testing.T, agent Agent, opts ...Option) *Proxy {
+	t.Helper()
+	p, err := New(agent, testLabels, "1.0.0", opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return p
+}
+
 const okAnswer = `{"label":"PHONE","confidence":0.8,"sensitivity":"PII","reason_ru":"формат телефона"}`
 
 func TestClassifyHappyPath(t *testing.T) {
 	f := newFakeLLM(t, okAnswer)
-	p := New(testAgent(f.url()), testLabels, "1.0.0")
+	p := mustNew(t, testAgent(f.url()))
 	res, err := p.Classify(t.Context(), "String", []string{"+7 999 123-45-67", "+7 495 111-22-33"})
 	if err != nil {
 		t.Fatalf("Classify: %v", err)
@@ -83,7 +117,7 @@ func TestClassifyHappyPath(t *testing.T) {
 // TestIsolationNoRawPII — ключевой тест п. 16.3: в теле запроса нет сырых ПИИ.
 func TestIsolationNoRawPII(t *testing.T) {
 	f := newFakeLLM(t, okAnswer)
-	p := New(testAgent(f.url()), testLabels, "1.0.0")
+	p := mustNew(t, testAgent(f.url()))
 	raw := []string{
 		"4111 1111 1111 1111",     // PAN
 		"ivan.petrov@example.com", // email
@@ -116,7 +150,7 @@ func TestIsolationNoRawPII(t *testing.T) {
 // TestIsolationNoEnvelopeFields — в конверте только поля п. 5.3.
 func TestIsolationNoEnvelopeFields(t *testing.T) {
 	f := newFakeLLM(t, okAnswer)
-	p := New(testAgent(f.url()), testLabels, "1.0.0")
+	p := mustNew(t, testAgent(f.url()))
 	if _, err := p.Classify(t.Context(), "String", []string{"+7 999 123-45-67"}); err != nil {
 		t.Fatalf("Classify: %v", err)
 	}
@@ -138,7 +172,7 @@ func TestIsolationNoEnvelopeFields(t *testing.T) {
 // TestCallsIndependent — каждый вызов независим (нет сквозного контекста, п. 16.3).
 func TestCallsIndependent(t *testing.T) {
 	f := newFakeLLM(t, okAnswer)
-	p := New(testAgent(f.url()), testLabels, "1.0.0")
+	p := mustNew(t, testAgent(f.url()))
 	_, _ = p.Classify(t.Context(), "String", []string{"+7 999 123-45-67"})
 	_, _ = p.Classify(t.Context(), "String", []string{"ivan@example.com"})
 	f.mu.Lock()
@@ -167,7 +201,7 @@ func TestCallsIndependent(t *testing.T) {
 func TestRetryOnInvalidAnswer(t *testing.T) {
 	f := newFakeLLM(t, okAnswer)
 	f.failFirst = 2 // первые 2 вызова — невалидный ответ
-	p := New(testAgent(f.url()), testLabels, "1.0.0")
+	p := mustNew(t, testAgent(f.url()))
 	res, err := p.Classify(t.Context(), "String", []string{"+7 999 123-45-67"})
 	if err != nil {
 		t.Fatalf("Classify с ретраями: %v", err)
@@ -186,7 +220,7 @@ func TestRetryOnInvalidAnswer(t *testing.T) {
 // TestInvalidAnswerExhaustsRetries — все ответы невалидны → ошибка после ретраев.
 func TestInvalidAnswerExhaustsRetries(t *testing.T) {
 	f := newFakeLLM(t, `{"label":"NOPE","confidence":5}`)
-	p := New(testAgent(f.url()), testLabels, "1.0.0")
+	p := mustNew(t, testAgent(f.url()))
 	if _, err := p.Classify(t.Context(), "String", []string{"+7 999 123-45-67"}); err == nil {
 		t.Fatal("невалидный ответ должен дать ошибку после исчерпания ретраев")
 	}
@@ -195,7 +229,7 @@ func TestInvalidAnswerExhaustsRetries(t *testing.T) {
 // TestSmallSampleExcluded — все значения короче MinLen → вызов не делается (п. 7).
 func TestSmallSampleExcluded(t *testing.T) {
 	f := newFakeLLM(t, okAnswer)
-	p := New(testAgent(f.url()), testLabels, "1.0.0")
+	p := mustNew(t, testAgent(f.url()))
 	if _, err := p.Classify(t.Context(), "String", []string{"ab", "cd", "1"}); err == nil {
 		t.Fatal("small_sample должен дать ошибку без вызова агента")
 	}
@@ -210,7 +244,7 @@ func TestSmallSampleExcluded(t *testing.T) {
 // TestVerifyConfirm — режим верификатора (п. 5.3, п. 7).
 func TestVerifyConfirm(t *testing.T) {
 	f := newFakeLLM(t, `{"verdict":"confirm","label":"PHONE","confidence":0.85,"reason_ru":"совпадает"}`)
-	p := New(testAgent(f.url()), testLabels, "1.0.0")
+	p := mustNew(t, testAgent(f.url()))
 	res, err := p.Verify(t.Context(), "PHONE", "String", []string{"+7 999 123-45-67"})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
@@ -223,7 +257,7 @@ func TestVerifyConfirm(t *testing.T) {
 // TestVerifyConfirmMismatchedLabel — confirm с чужим label → ошибка (п. 5.3).
 func TestVerifyConfirmMismatchedLabel(t *testing.T) {
 	f := newFakeLLM(t, `{"verdict":"confirm","label":"EMAIL","confidence":0.85,"reason_ru":"x"}`)
-	p := New(testAgent(f.url()), testLabels, "1.0.0")
+	p := mustNew(t, testAgent(f.url()))
 	if _, err := p.Verify(t.Context(), "PHONE", "String", []string{"+7 999 123-45-67"}); err == nil {
 		t.Fatal("confirm с чужим label должен дать ошибку")
 	}
@@ -232,12 +266,68 @@ func TestVerifyConfirmMismatchedLabel(t *testing.T) {
 // TestVerifyReject — reject с альтернативным лейблом.
 func TestVerifyReject(t *testing.T) {
 	f := newFakeLLM(t, `{"verdict":"reject","label":"FREE_TEXT","confidence":0.6,"reason_ru":"похоже на текст"}`)
-	p := New(testAgent(f.url()), testLabels, "1.0.0")
+	p := mustNew(t, testAgent(f.url()))
 	res, err := p.Verify(t.Context(), "PHONE", "String", []string{"+7 999 123-45-67"})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 	if res.Verdict != "reject" || res.Label != "FREE_TEXT" {
 		t.Fatalf("неожиданный верификат: %+v", res)
+	}
+}
+
+// TestUsageAndLatencyParsed — агент вернул usage: токены и латентность
+// заполнены (учёт в agent_calls, blueprint п. 10.6).
+func TestUsageAndLatencyParsed(t *testing.T) {
+	f := newFakeLLM(t, okAnswer)
+	f.usage = map[string]any{"prompt_tokens": 123, "completion_tokens": 45}
+	p := mustNew(t, testAgent(f.url()))
+	res, err := p.Classify(t.Context(), "String", []string{"+7 999 123-45-67"})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if res.Usage.TokensIn != 123 || res.Usage.TokensOut != 45 {
+		t.Fatalf("usage не разобран: %+v", res.Usage)
+	}
+	if res.Latency <= 0 {
+		t.Fatalf("латентность не измерена: %v", res.Latency)
+	}
+}
+
+// TestUsageAbsentZero — агент без usage (локальные контуры): нули, латентность
+// всё равно измерена (п. 10.6).
+func TestUsageAbsentZero(t *testing.T) {
+	f := newFakeLLM(t, okAnswer)
+	p := mustNew(t, testAgent(f.url()))
+	res, err := p.Classify(t.Context(), "String", []string{"+7 999 123-45-67"})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if res.Usage.TokensIn != 0 || res.Usage.TokensOut != 0 {
+		t.Fatalf("usage без поля в ответе должен быть нулевым: %+v", res.Usage)
+	}
+	if res.Latency <= 0 {
+		t.Fatalf("латентность не измерена: %v", res.Latency)
+	}
+}
+
+// TestVerifyUsageLatency — режим верификатора тоже отдаёт usage/latency.
+func TestVerifyUsageLatency(t *testing.T) {
+	f := newFakeLLM(t, `{"verdict":"confirm","label":"PHONE","confidence":0.85,"reason_ru":"совпадает"}`)
+	f.usage = map[string]any{"prompt_tokens": 10, "completion_tokens": 5}
+	p := mustNew(t, testAgent(f.url()))
+	res, err := p.Verify(t.Context(), "PHONE", "String", []string{"+7 999 123-45-67"})
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if res.Usage.TokensIn != 10 || res.Usage.TokensOut != 5 || res.Latency <= 0 {
+		t.Fatalf("usage/latency верификатора: %+v, %v", res.Usage, res.Latency)
+	}
+}
+
+// TestNewEmptyEndpointRejected — endpoint обязателен (п. 5.3).
+func TestNewEmptyEndpointRejected(t *testing.T) {
+	if _, err := New(Agent{ID: "x", Model: "m"}, testLabels, "1.0.0"); err == nil {
+		t.Fatal("пустой endpoint должен отклоняться конструктором")
 	}
 }

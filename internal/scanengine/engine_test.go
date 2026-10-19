@@ -244,7 +244,7 @@ func TestGrayCorridorLLMEscalation(t *testing.T) {
 		classifyResult: &agentproxy.ClassifyResult{Label: "PHONE", Confidence: 0.65, Sensitivity: "PII", PromptVersion: "1"},
 		verifyResult:   &agentproxy.VerifyResult{Verdict: "confirm", Label: "PHONE", Confidence: 0.85},
 	}
-	eng.SetLLM(llm)
+	eng.SetLLM(llm, LLMIdentity{AgentID: "zond-main", Model: "gpt-4o-mini"})
 	_, vs := scanAndList(t, eng, st, testSource())
 
 	v := vs["users/phone"]
@@ -267,7 +267,7 @@ func TestLLMNotCalledForChecksum(t *testing.T) {
 		classifyResult: &agentproxy.ClassifyResult{Label: "PHONE", Confidence: 0.65, PromptVersion: "1"},
 		verifyResult:   &agentproxy.VerifyResult{Verdict: "confirm", Label: "PHONE", Confidence: 0.85},
 	}
-	eng.SetLLM(llm)
+	eng.SetLLM(llm, LLMIdentity{AgentID: "zond-main", Model: "gpt-4o-mini"})
 	_, vs := scanAndList(t, eng, st, testSource())
 	if v := vs["users/inn"]; v.Confidence != 0.99 || v.EvidenceLayer != verdict.LayerRules {
 		t.Errorf("ИНН должен остаться checksum 0.99 rules: %+v", v)

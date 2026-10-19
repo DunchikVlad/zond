@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -80,7 +81,7 @@ func runConfig(args []string) int {
 }
 
 // ---------------------------------------------------------------------------
-// scan (этап 1: слои 0–1, без LLM)
+// scan (этап 1: слои 0–1; -llm подключает слой 2, инкремент 4в)
 // ---------------------------------------------------------------------------
 
 func runScan(args []string) int {
@@ -89,6 +90,7 @@ func runScan(args []string) int {
 	source := fs.String("source", "", "имя источника из connections.yaml (обязательно)")
 	dbPath := fs.String("db", "zond.db", "файл Verdict Store (SQLite)")
 	profile := fs.String("profile", "", "профиль quick|deep|custom (по умолчанию — из detectors.yaml)")
+	useLLM := fs.Bool("llm", false, "подключить LLM-слой из реестра agents detectors.yaml")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -153,12 +155,21 @@ func runScan(args []string) int {
 		Clustering:        true, // п. 7.6
 		ClusterSimilarity: b.Detectors.Cluster.Similarity,
 		ClusterMaxSize:    b.Detectors.Cluster.MaxSize,
+		CostScanLimitUSD:  b.Detectors.Proxy.CostScanLimitUSD, // budget-стоп, п. 10.4
 	}
 	if len(b.Detectors.Agents) > 0 {
 		// идентичность агента для ключа кэша вердиктов (п. 10.5)
 		cfg.CacheScope = b.Detectors.Agents[0].ID + "|" + b.Detectors.Agents[0].Model
 	}
 	eng := scanengine.New(st, meta.New(b.Taxonomy.Synonyms), cfg)
+	if *useLLM {
+		comp, id, err := buildLLMComposite(b, taxonomyLabels(b.Taxonomy))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "scan -llm:", err)
+			return 2
+		}
+		eng.SetLLM(comp, id)
+	}
 	rep, err := eng.Scan(context.Background(), conn, src.Name, prof)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scan: %v\n", err)
@@ -176,6 +187,75 @@ func findSource(c *config.Connections, name string) (*config.Source, error) {
 		}
 	}
 	return nil, fmt.Errorf("источник %q не найден в connections.yaml", name)
+}
+
+// llmComposite — композиция прокси агентов реестра под интерфейс движка:
+// Classify — прокси основного агента (agents[0]), Verify — прокси агента
+// escalate_to, если задан, иначе тот же прокси (blueprint п. 7 правило 4).
+type llmComposite struct {
+	classify *agentproxy.Proxy
+	verify   *agentproxy.Proxy
+}
+
+func (c *llmComposite) Classify(ctx context.Context, nativeType string, values []string) (*agentproxy.ClassifyResult, error) {
+	return c.classify.Classify(ctx, nativeType, values)
+}
+
+func (c *llmComposite) Verify(ctx context.Context, candidate, nativeType string, values []string) (*agentproxy.VerifyResult, error) {
+	return c.verify.Verify(ctx, candidate, nativeType, values)
+}
+
+// buildLLMComposite собирает LLM-слой для `zond scan -llm`: shared Gate
+// лимитов (п. 10.4), прокси с egress-политикой (п. 10.7), композит эскалации.
+// Любая неудача — fail-fast (код 2): скан без работающего LLM-слоя не стартует.
+func buildLLMComposite(b *config.Bundle, labels []string) (scanengine.LLMClassifier, scanengine.LLMIdentity, error) {
+	agents := b.Detectors.Agents
+	if len(agents) == 0 {
+		return nil, scanengine.LLMIdentity{}, errors.New("реестр agents пуст (detectors.yaml)")
+	}
+	main := agents[0]
+	key := os.Getenv(main.APIKeyEnv)
+	if key == "" {
+		return nil, scanengine.LLMIdentity{}, fmt.Errorf("env %s не задан (api_key_env агента %s)", main.APIKeyEnv, main.ID)
+	}
+	gate := agentproxy.NewGate(b.Detectors.Proxy.MaxConcurrent, b.Detectors.Proxy.RateLimitRPS)
+	mainProxy, err := newAgentProxy(main, key, b.Taxonomy.Version, labels, gate, b.Detectors.Proxy.Offline)
+	if err != nil {
+		return nil, scanengine.LLMIdentity{}, err
+	}
+	verifyProxy := mainProxy
+	if main.EscalateTo != "" {
+		var esc *config.AgentSpec
+		for i := range agents {
+			if agents[i].ID == main.EscalateTo {
+				esc = &agents[i]
+				break
+			}
+		}
+		escKey := os.Getenv(esc.APIKeyEnv)
+		if escKey == "" {
+			return nil, scanengine.LLMIdentity{}, fmt.Errorf("env %s не задан (api_key_env агента-верификатора %s)", esc.APIKeyEnv, esc.ID)
+		}
+		verifyProxy, err = newAgentProxy(*esc, escKey, b.Taxonomy.Version, labels, gate, b.Detectors.Proxy.Offline)
+		if err != nil {
+			return nil, scanengine.LLMIdentity{}, err
+		}
+	}
+	return &llmComposite{classify: mainProxy, verify: verifyProxy},
+		scanengine.LLMIdentity{AgentID: main.ID, Model: main.Model}, nil
+}
+
+// newAgentProxy строит прокси агента с лимитами и egress-политикой (п. 10.4,
+// п. 10.7). Ошибка конструирования (в т.ч. запрет egress) — причина fail-fast.
+func newAgentProxy(a config.AgentSpec, apiKey, taxVersion string, labels []string, gate *agentproxy.Gate, offline bool) (*agentproxy.Proxy, error) {
+	return agentproxy.New(agentproxy.Agent{
+		ID: a.ID, Endpoint: a.Endpoint, Model: a.Model, APIKey: apiKey,
+		MaxValuesPerCall: a.MaxValuesPerCall, Timeout: time.Duration(a.TimeoutS) * time.Second,
+		MaxRetries: a.MaxRetries,
+	}, labels, taxVersion,
+		agentproxy.WithGate(gate),
+		agentproxy.WithPolicy(agentproxy.Policy{Offline: offline, Allowlist: a.Allowlist}),
+	)
 }
 
 func sensitivityMap(t *config.Taxonomy) map[verdict.Label]verdict.Sensitivity {
@@ -220,18 +300,27 @@ func runAgentCheck(args []string) int {
 			failed++
 			continue
 		}
+		// Preflight п. 15.3 включает egress-политику (п. 10.7): прокси
+		// строится и в offline-режиме — запрещённый эндпоинт = FAIL.
+		proxy, err := agentproxy.New(agentproxy.Agent{
+			ID: a.ID, Endpoint: a.Endpoint, Model: a.Model, APIKey: key,
+			MaxValuesPerCall: a.MaxValuesPerCall, Timeout: time.Duration(a.TimeoutS) * time.Second,
+			MaxRetries: a.MaxRetries,
+		}, labels, b.Taxonomy.Version,
+			agentproxy.WithPolicy(agentproxy.Policy{Offline: b.Detectors.Proxy.Offline, Allowlist: a.Allowlist}),
+		)
+		if err != nil {
+			fmt.Printf("agent %s: FAIL (%v)\n", a.ID, err)
+			failed++
+			continue
+		}
 		if !*online {
 			fmt.Printf("agent %s: OK (endpoint=%s model=%s env %s задан; пробный вызов пропущен, -online)\n",
 				a.ID, a.Endpoint, a.Model, a.APIKeyEnv)
 			continue
 		}
-		proxy := agentproxy.New(agentproxy.Agent{
-			ID: a.ID, Endpoint: a.Endpoint, Model: a.Model, APIKey: key,
-			MaxValuesPerCall: a.MaxValuesPerCall, Timeout: time.Duration(a.TimeoutS) * time.Second,
-			MaxRetries: a.MaxRetries,
-		}, labels, b.Taxonomy.Version)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(a.TimeoutS)*time.Second)
-		_, err := proxy.Classify(ctx, "String", []string{"ivan@example.com", "petr@test.io"})
+		_, err = proxy.Classify(ctx, "String", []string{"ivan@example.com", "petr@test.io"})
 		cancel()
 		if err != nil {
 			fmt.Printf("agent %s: FAIL (вызов: %v)\n", a.ID, err)
@@ -252,6 +341,6 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "использование:")
 	fmt.Fprintln(os.Stderr, "  zond version")
 	fmt.Fprintln(os.Stderr, "  zond config validate [-dir configs]")
-	fmt.Fprintln(os.Stderr, "  zond scan -source <имя> [-config configs] [-db zond.db] [-profile quick|deep|custom]")
+	fmt.Fprintln(os.Stderr, "  zond scan -source <имя> [-config configs] [-db zond.db] [-profile quick|deep|custom] [-llm]")
 	fmt.Fprintln(os.Stderr, "  zond agent-check [-config configs] [-online]")
 }

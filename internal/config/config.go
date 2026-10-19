@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -196,6 +197,16 @@ type Detectors struct {
 	Ensemble EnsembleConfig `yaml:"ensemble"`
 	Agents   []AgentSpec    `yaml:"agents"`
 	Cluster  ClusterConfig  `yaml:"cluster"` // п. 7.6
+	Proxy    ProxyConfig    `yaml:"proxy"`   // п. 10.4, п. 10.7
+}
+
+// ProxyConfig — лимиты и budget-стоп LLM-слоя (blueprint п. 10.4) и флаг
+// offline egress-политики (п. 10.7). Нули — значения по умолчанию/без лимита.
+type ProxyConfig struct {
+	Offline          bool    `yaml:"offline"`             // п. 10.7: запретить эндпоинты вне allowlist
+	MaxConcurrent    int     `yaml:"max_concurrent"`      // семафор, 0 → default 8
+	RateLimitRPS     float64 `yaml:"rate_limit_rps"`      // 0 → без лимита
+	CostScanLimitUSD float64 `yaml:"cost_scan_limit_usd"` // 0 → без лимита
 }
 
 // ClusterConfig — кластеризация колонок по отпечатку (blueprint п. 7.6).
@@ -238,6 +249,7 @@ type AgentSpec struct {
 	MaxRetries       int        `yaml:"max_retries"`
 	ConfidenceBand   [2]float64 `yaml:"confidence_band"`
 	EscalateTo       string     `yaml:"escalate_to"`
+	Allowlist        []string   `yaml:"allowlist"` // п. 10.7: IP/CIDR/hostname, иначе — только loopback/RFC 1918
 }
 
 var sampleModes = []string{"rows", "percent"}
@@ -300,6 +312,11 @@ func (d *Detectors) Validate() error {
 		if band[0] < 0 || band[1] > 1 || band[0] >= band[1] {
 			errs = append(errs, fmt.Errorf("agents[%d] (%s): confidence_band должен быть [lo, hi] в пределах [0,1], lo<hi", i, a.ID))
 		}
+		for j, entry := range a.Allowlist {
+			if !validAllowlistEntry(entry) {
+				errs = append(errs, fmt.Errorf("agents[%d] (%s): allowlist[%d]=%q — не IP/CIDR и не hostname (п. 10.7)", i, a.ID, j, entry))
+			}
+		}
 	}
 	for i, a := range d.Agents {
 		if a.EscalateTo != "" && !ids[a.EscalateTo] {
@@ -312,7 +329,41 @@ func (d *Detectors) Validate() error {
 	if d.Cluster.MaxSize < 0 {
 		errs = append(errs, fmt.Errorf("cluster.max_size должен быть >= 0 (0 = default 100)"))
 	}
+	if d.Proxy.MaxConcurrent < 0 {
+		errs = append(errs, fmt.Errorf("proxy.max_concurrent должен быть >= 0 (0 = default 8, п. 10.4)"))
+	}
+	if d.Proxy.RateLimitRPS < 0 {
+		errs = append(errs, fmt.Errorf("proxy.rate_limit_rps должен быть >= 0 (0 = без лимита, п. 10.4)"))
+	}
+	if d.Proxy.CostScanLimitUSD < 0 {
+		errs = append(errs, fmt.Errorf("proxy.cost_scan_limit_usd должен быть >= 0 (0 = без лимита, п. 10.4)"))
+	}
 	return errors.Join(errs...)
+}
+
+// validAllowlistEntry — запись allowlist валидна, если парсится как IP/CIDR
+// (netip) или hostname: буквы/цифры/'.'/'-', начинается и кончается alnum
+// (blueprint п. 10.7).
+func validAllowlistEntry(s string) bool {
+	if s == "" {
+		return false
+	}
+	if _, err := netip.ParseAddr(s); err == nil {
+		return true
+	}
+	if _, err := netip.ParsePrefix(s); err == nil {
+		return true
+	}
+	for i := 0; i < len(s); i++ {
+		if !isAlnum(s[i]) && s[i] != '.' && s[i] != '-' {
+			return false
+		}
+	}
+	return isAlnum(s[0]) && isAlnum(s[len(s)-1])
+}
+
+func isAlnum(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
 // LoadDetectors загружает detectors.yaml (секретов нет — только имена env).

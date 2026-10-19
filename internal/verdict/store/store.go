@@ -1,7 +1,8 @@
 // Package store — Verdict Store на SQLite (ADR-0006, blueprint п. 11.1):
 // modernc.org/sqlite (чистый Go, без cgo), миграции goose embed-ятся
-// в бинарник. Этап 1: таблицы scans/scan_tables/verdicts; полная схема
-// п. 11.1 (verdict_cache, agent_calls, audit_log, …) — этап 5.
+// в бинарник. Этап 1: таблицы scans/scan_tables/verdicts; инкремент 4б —
+// verdict_cache; инкремент 4в — agent_calls + model_prices (п. 10.6).
+// Полная схема п. 11.1 (audit_log, review_events, …) — этап 5.
 package store
 
 import (
@@ -108,51 +109,6 @@ func (s *Store) MarkTable(ctx context.Context, scanID, table string, rowCount in
 // ---------------------------------------------------------------------------
 // verdicts
 // ---------------------------------------------------------------------------
-
-// SaveVerdicts атомарно сохраняет вердикты; повторная вставка того же id
-// заменяет запись (идемпотентность, blueprint п. 5.4/п. 13).
-func (s *Store) SaveVerdicts(ctx context.Context, vs []verdict.Verdict) error {
-	if len(vs) == 0 {
-		return nil
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	// Rollback после Commit вернёт sql.ErrTxDone — безопасно игнорировать.
-	defer func() { _ = tx.Rollback() }()
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO verdicts (id, scan_id, table_name, path, native_type, label, sensitivity,
-		  confidence, evidence_layer, evidence, taxonomy_version, detectors_version, prompt_version,
-		  sample_size, cluster_id, review_status, final_label, reviewed_by, reviewed_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (id) DO UPDATE SET
-		  label = excluded.label, sensitivity = excluded.sensitivity,
-		  confidence = excluded.confidence, evidence_layer = excluded.evidence_layer,
-		  evidence = excluded.evidence, review_status = excluded.review_status,
-		  sample_size = excluded.sample_size, created_at = excluded.created_at`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-	for i := range vs {
-		v := &vs[i]
-		ev, err := json.Marshal(v.Evidence)
-		if err != nil {
-			return fmt.Errorf("verdict %s: evidence: %w", v.ID, err)
-		}
-		_, err = stmt.ExecContext(ctx, v.ID, v.ScanID, v.Table, v.Path, v.NativeType,
-			string(v.Label), string(v.Sensitivity), v.Confidence, string(v.EvidenceLayer),
-			string(ev), v.TaxonomyVersion, v.DetectorsVersion, v.PromptVersion,
-			v.SampleSize, v.ClusterID, string(v.ReviewStatus), string(v.FinalLabel),
-			v.ReviewedBy, v.ReviewedAt.UTC().Format(time.RFC3339),
-			v.CreatedAt.UTC().Format(time.RFC3339))
-		if err != nil {
-			return fmt.Errorf("verdict %s: %w", v.ID, err)
-		}
-	}
-	return tx.Commit()
-}
 
 // ListVerdicts возвращает вердикты прогона.
 func (s *Store) ListVerdicts(ctx context.Context, scanID string) ([]verdict.Verdict, error) {

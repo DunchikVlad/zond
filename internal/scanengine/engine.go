@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -52,6 +53,16 @@ type Config struct {
 	Clustering        bool   // кластеризация колонок до слоя 2
 	ClusterSimilarity float64
 	ClusterMaxSize    int
+
+	// Инкремент 4в: budget-стоп LLM-слоя (blueprint п. 10.4).
+	CostScanLimitUSD float64 // суммарная стоимость вызовов скана; >0 — при превышении LLM-вызовы прекращаются
+}
+
+// LLMIdentity — идентичность агента для учётных записей agent_calls
+// (blueprint п. 10.6): кто и какая моделя выполнила вызов.
+type LLMIdentity struct {
+	AgentID string
+	Model   string
 }
 
 // LLMClassifier — минимальный интерфейс LLM-слоя для движка (п. 7).
@@ -67,10 +78,25 @@ type Engine struct {
 	meta      *meta.Analyzer
 	recs      []rules.Recognizer
 	llm       LLMClassifier // nil → слой 2 (LLM) отключён
+	llmID     LLMIdentity   // идентичность для agent_calls (п. 10.6)
 	cfg       Config
 	nowFn     func() time.Time
 	clusterer *cluster.Clusterer // на скан (п. 7.6); nil — кластеризация выключена
 	stats     scanStats          // счётчики экономики текущего прогона
+
+	// Инкремент 4в: буфер учётных записей вызовов текущей таблицы (п. 10.6)
+	// и накопленная стоимость/бюджет (п. 10.4). Сбрасываются после коммита
+	// таблицы вместе с вердиктами (атомарность п. 13).
+	calls          []store.AgentCall
+	cost           float64
+	budgetExceeded bool
+	prices         map[string]modelPrice // ленивый кэш прайс-листа model_prices
+}
+
+// modelPrice — цена модели за 1M токенов (п. 11.1) из кэша движка.
+type modelPrice struct {
+	in  float64
+	out float64
 }
 
 // scanStats — счётчики экономики сканирования (blueprint п. 17).
@@ -78,6 +104,9 @@ type scanStats struct {
 	llmCalls   int // реальные вызовы LLM
 	cacheHits  int // вердикты из кэша (п. 10.5)
 	propagated int // вердикты из кластера (п. 7.6)
+	llmErrors  int // вызовы LLM, завершившиеся ошибкой (п. 10.6: status='error')
+	tokensIn   int // суммарные входящие токены ok-вызовов (п. 17)
+	tokensOut  int // суммарные исходящие токены ok-вызовов (п. 17)
 }
 
 // New собирает движок: recognizer'ы слоя 1 по умолчанию (rules.Default).
@@ -86,7 +115,11 @@ func New(st *store.Store, m *meta.Analyzer, cfg Config) *Engine {
 }
 
 // SetLLM подключает LLM-слой (этап 4): серый коридор + эскалация (п. 7).
-func (e *Engine) SetLLM(llm LLMClassifier) { e.llm = llm }
+// id — идентичность агента для учёта вызовов (п. 10.6).
+func (e *Engine) SetLLM(llm LLMClassifier, id LLMIdentity) {
+	e.llm = llm
+	e.llmID = id
+}
 
 // Report — итог прогона (консольный отчёт этапа 1).
 type Report struct {
@@ -104,9 +137,13 @@ type Report struct {
 	ByLabel           map[string]int
 	ByLayer           map[string]int
 	ByStatus          map[string]int
-	LLMCalls          int // экономика: реальные вызовы LLM (п. 17)
-	CacheHits         int // вердикты из кэша (п. 10.5)
-	ClusterPropagated int // вердикты из кластеров (п. 7.6)
+	LLMCalls          int     // экономика: реальные вызовы LLM (п. 17)
+	CacheHits         int     // вердикты из кэша (п. 10.5)
+	ClusterPropagated int     // вердикты из кластеров (п. 7.6)
+	LLMErrors         int     // вызовы LLM со статусом error (п. 10.6)
+	TokensIn          int     // суммарные входящие токены ok-вызовов (п. 17)
+	TokensOut         int     // суммарные исходящие токены ok-вызовов (п. 17)
+	CostUSD           float64 // стоимость вызовов скана по прайс-листу (п. 11.1)
 	Errors            []string
 }
 
@@ -119,8 +156,8 @@ func (r *Report) Text(w io.Writer) {
 	fmt.Fprintf(w, "По слоям: %s\n", joinSorted(r.ByLayer))
 	fmt.Fprintf(w, "По лейблам: %s\n", joinSorted(r.ByLabel))
 	if r.LLMCalls+r.CacheHits+r.ClusterPropagated > 0 {
-		fmt.Fprintf(w, "Экономика: LLM-вызовов %d, из кэша %d, из кластеров %d\n",
-			r.LLMCalls, r.CacheHits, r.ClusterPropagated)
+		fmt.Fprintf(w, "Экономика: LLM-вызовов %d, из кэша %d, из кластеров %d, $%0.4f (токены in/out %d/%d)\n",
+			r.LLMCalls, r.CacheHits, r.ClusterPropagated, r.CostUSD, r.TokensIn, r.TokensOut)
 	}
 	if len(r.Errors) > 0 {
 		fmt.Fprintf(w, "Ошибки таблиц:\n")
@@ -169,6 +206,9 @@ func (e *Engine) Scan(ctx context.Context, conn connector.Connector, sourceName,
 		e.clusterer = nil
 	}
 	e.stats = scanStats{}
+	e.calls = nil
+	e.cost = 0
+	e.budgetExceeded = false
 
 	tables, err := conn.ListTables(ctx)
 	if err != nil {
@@ -190,9 +230,16 @@ func (e *Engine) Scan(ctx context.Context, conn connector.Connector, sourceName,
 	if rep.TablesFailed > 0 {
 		status = "partial"
 	}
+	if e.budgetExceeded {
+		status = "budget_exceeded" // budget-стоп приоритетнее done/partial (п. 10.4)
+	}
 	rep.LLMCalls = e.stats.llmCalls
 	rep.CacheHits = e.stats.cacheHits
 	rep.ClusterPropagated = e.stats.propagated
+	rep.LLMErrors = e.stats.llmErrors
+	rep.TokensIn = e.stats.tokensIn
+	rep.TokensOut = e.stats.tokensOut
+	rep.CostUSD = e.cost
 	if err := e.aggregate(ctx, rep); err != nil {
 		return rep, err
 	}
@@ -209,6 +256,8 @@ func (e *Engine) finish(ctx context.Context, rep *Report, status string) {
 		"by_layer": rep.ByLayer, "by_label": rep.ByLabel,
 		"llm_calls": rep.LLMCalls, "cache_hits": rep.CacheHits,
 		"cluster_propagated": rep.ClusterPropagated,
+		"llm_errors":         rep.LLMErrors, "tokens_in": rep.TokensIn, "tokens_out": rep.TokensOut,
+		"cost_usd": rep.CostUSD,
 	})
 	_ = e.st.FinishScan(ctx, rep.ScanID, status, string(stats), rep.FinishedAt)
 }
@@ -232,6 +281,7 @@ func (e *Engine) aggregate(ctx context.Context, rep *Report) error {
 }
 
 func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID string, t connector.TableRef, rep *Report) error {
+	e.takeCalls() // сброс буфера: вызовы failed-таблицы не должны попасть в чужой коммит (п. 13)
 	cols, err := conn.GetSchema(ctx, t)
 	if err != nil {
 		_ = e.st.MarkTable(ctx, scanID, t.Name, 0, "failed", err.Error())
@@ -251,7 +301,9 @@ func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID
 		}
 		vs = append(vs, v)
 	}
-	if err := e.st.SaveVerdicts(ctx, vs); err != nil {
+	// вердикты и учётные записи вызовов — одна транзакция (п. 13:
+	// либо agent_calls+verdicts, либо откат)
+	if err := e.st.SaveVerdictsWithCalls(ctx, vs, e.takeCalls()); err != nil {
 		_ = e.st.MarkTable(ctx, scanID, t.Name, rowCount, "failed", err.Error())
 		return err
 	}
@@ -348,18 +400,23 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 	out := ensemble.Decide(cands, e.cfg.TauAccept, weights, gray)
 
 	// серый коридор: вызов LLM-классификатора (этап 4) с кэшем вердиктов
-	// (п. 10.5), затем эскалация в верификатор.
+	// (п. 10.5), затем эскалация в верификатор. Budget-стоп (п. 10.4): после
+	// превышения cost_scan_limit_usd вызовы не делаются, колонка остаётся
+	// pending с пометкой budget_exceeded.
 	if e.llm != nil && out.Escalate && e.enoughForLLM(pool) {
-		if res := e.llmClassify(ctx, col, pool, maskedVals, &v); res != nil {
-			cands = append(cands, ensemble.Candidate{Label: verdict.Label(res.Label), Confidence: res.Confidence, Layer: verdict.LayerLLM})
-			out = ensemble.Decide(cands, e.cfg.TauAccept, weights, gray)
-		}
-		// эскалация в верификатор, если решение всё ещё в серой зоне (п. 7 правило 4)
-		if out.Escalate {
-			if vr, err := e.llm.Verify(ctx, string(out.GrayBest.Label), col.NativeType, pool.Values); err == nil && vr != nil {
-				out = ensemble.ApplyVerifier(out, ensemble.VerifierOutcome{
-					Verdict: vr.Verdict, Label: verdict.Label(vr.Label), Confidence: vr.Confidence,
-				}, e.cfg.TauAccept)
+		if e.budgetExceeded {
+			if v.Evidence == nil {
+				v.Evidence = map[string]any{}
+			}
+			v.Evidence["budget_exceeded"] = true
+		} else {
+			if res := e.llmClassify(ctx, col, pool, maskedVals, &v); res != nil {
+				cands = append(cands, ensemble.Candidate{Label: verdict.Label(res.Label), Confidence: res.Confidence, Layer: verdict.LayerLLM})
+				out = ensemble.Decide(cands, e.cfg.TauAccept, weights, gray)
+			}
+			// эскалация в верификатор, если решение всё ещё в серой зоне (п. 7 правило 4)
+			if out.Escalate && !e.budgetExceeded {
+				e.verifyGray(ctx, col, pool, &v, &out)
 			}
 		}
 	}
@@ -429,7 +486,9 @@ type cachedLLMVerdict struct {
 
 // llmClassify вызывает LLM-классификатора с кэшем вердиктов (п. 10.5): при
 // промахе — вызов и запись в кэш (TTL CacheTTLDefault), при попадании —
-// вердикт без сетевого обращения. Возвращает nil при ошибке вызова.
+// вердикт без сетевого обращения. Каждое обращение (вызов, ошибка, попадание
+// в кэш) порождает запись agent_calls (п. 10.6), коммит — с вердиктами
+// таблицы (п. 13). Возвращает nil при ошибке вызова.
 func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sampler.Pool, maskedVals []string, v *verdict.Verdict) *agentproxy.ClassifyResult {
 	cacheKey := ""
 	if e.cfg.CacheScope != "" {
@@ -438,16 +497,40 @@ func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sa
 			if cached, err := decodeCachedVerdict(cv.VerdictJSON); err == nil {
 				e.stats.cacheHits++
 				setLLMCacheEvidence(v, cv.AgentID, true)
+				// попадание в кэш — тоже учётная запись (cached=1, метрика
+				// доли кэша п. 17); сетевого вызова и токенов нет
+				e.recordCall(v, store.AgentCall{
+					PromptVersion: cached.PromptVersion,
+					Status:        "cache_hit",
+					Cached:        true,
+				})
 				return cached
 			}
 		}
 	}
+	start := e.nowFn()
 	res, err := e.llm.Classify(ctx, col.NativeType, pool.Values)
+	measured := e.nowFn().Sub(start)
 	if err != nil || res == nil {
+		e.stats.llmErrors++
+		e.recordCall(v, store.AgentCall{
+			PromptVersion: prompts.Version, LatencyMS: int64(measured / time.Millisecond), Status: "error",
+		})
 		return nil
 	}
 	e.stats.llmCalls++
 	v.PromptVersion = res.PromptVersion
+	latency := res.Latency
+	if latency <= 0 {
+		latency = measured // fake-реализации latency не отдают — меряем сами
+	}
+	e.recordCall(v, store.AgentCall{
+		PromptVersion: res.PromptVersion,
+		TokensIn:      res.Usage.TokensIn, TokensOut: res.Usage.TokensOut,
+		CostUSD:   e.callCost(ctx, res.Usage.TokensIn, res.Usage.TokensOut),
+		LatencyMS: int64(latency / time.Millisecond),
+		Status:    "ok",
+	})
 	if cacheKey != "" {
 		if b, mErr := json.Marshal(cachedLLMVerdict{
 			Label: res.Label, Confidence: res.Confidence, PromptVersion: res.PromptVersion,
@@ -463,6 +546,98 @@ func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sa
 		setLLMCacheEvidence(v, cacheAgentID(e.cfg.CacheScope), false)
 	}
 	return res
+}
+
+// verifyGray — эскалация в режим верификатора (п. 7 правило 4) с учётной
+// записью вызова (п. 10.6): Verify основного агента или escalate_to — решает
+// подставленный классификатор (в CLI — композит).
+func (e *Engine) verifyGray(ctx context.Context, col connector.Column, pool *sampler.Pool, v *verdict.Verdict, out *ensemble.Outcome) {
+	start := e.nowFn()
+	vr, err := e.llm.Verify(ctx, string(out.GrayBest.Label), col.NativeType, pool.Values)
+	measured := e.nowFn().Sub(start)
+	if err != nil || vr == nil {
+		e.stats.llmErrors++
+		e.recordCall(v, store.AgentCall{
+			PromptVersion: prompts.Version, LatencyMS: int64(measured / time.Millisecond), Status: "error",
+		})
+		return
+	}
+	latency := vr.Latency
+	if latency <= 0 {
+		latency = measured
+	}
+	e.recordCall(v, store.AgentCall{
+		PromptVersion: prompts.Version,
+		TokensIn:      vr.Usage.TokensIn, TokensOut: vr.Usage.TokensOut,
+		CostUSD:   e.callCost(ctx, vr.Usage.TokensIn, vr.Usage.TokensOut),
+		LatencyMS: int64(latency / time.Millisecond),
+		Status:    "ok",
+	})
+	*out = ensemble.ApplyVerifier(*out, ensemble.VerifierOutcome{
+		Verdict: vr.Verdict, Label: verdict.Label(vr.Label), Confidence: vr.Confidence,
+	}, e.cfg.TauAccept)
+}
+
+// recordCall копит учётную запись вызова (п. 10.6) в буфере таблицы; коммит —
+// вместе с вердиктами (п. 13). Стоимость и токены накапливаются только по
+// реальным ok-вызовам; при достижении cost_scan_limit_usd ставится
+// budgetExceeded (п. 10.4).
+func (e *Engine) recordCall(v *verdict.Verdict, call store.AgentCall) {
+	call.ID = store.NewCallID()
+	call.ScanID = v.ScanID
+	call.VerdictID = v.ID
+	if call.AgentID == "" {
+		call.AgentID = e.llmID.AgentID
+	}
+	if call.Model == "" {
+		call.Model = e.llmID.Model
+	}
+	call.CreatedAt = e.nowFn()
+	e.calls = append(e.calls, call)
+	if call.Status == "ok" && !call.Cached {
+		e.cost += call.CostUSD
+		e.stats.tokensIn += call.TokensIn
+		e.stats.tokensOut += call.TokensOut
+		if e.cfg.CostScanLimitUSD > 0 && e.cost >= e.cfg.CostScanLimitUSD {
+			e.budgetExceeded = true
+		}
+	}
+}
+
+// takeCalls возвращает буфер вызовов таблицы и очищает его (передача в
+// транзакцию п. 13).
+func (e *Engine) takeCalls() []store.AgentCall {
+	calls := e.calls
+	e.calls = nil
+	return calls
+}
+
+// callCost — стоимость вызова по прайс-листу model_prices (п. 11.1):
+// cost = tokens_in/1e6·per_1m_in + tokens_out/1e6·per_1m_out, округление
+// до 6 знаков. Модели нет в прайсе → 0 (учёт без цены, п. 17).
+func (e *Engine) callCost(ctx context.Context, tokensIn, tokensOut int) float64 {
+	pin, pout, ok := e.priceFor(ctx, e.llmID.Model)
+	if !ok {
+		return 0
+	}
+	cost := float64(tokensIn)/1e6*pin + float64(tokensOut)/1e6*pout
+	return math.Round(cost*1e6) / 1e6
+}
+
+// priceFor — цена модели с ленивым кэшем прайс-листа на скан.
+func (e *Engine) priceFor(ctx context.Context, model string) (float64, float64, bool) {
+	if e.prices == nil {
+		e.prices = map[string]modelPrice{}
+	}
+	if p, ok := e.prices[model]; ok {
+		return p.in, p.out, true
+	}
+	pin, pout, ok := e.st.PriceFor(ctx, model, e.nowFn())
+	if !ok {
+		return 0, 0, false
+	}
+	e.prices[model] = modelPrice{in: pin, out: pout}
+	return pin, pout, true
 }
 
 func setLLMCacheEvidence(v *verdict.Verdict, agentID string, hit bool) {
