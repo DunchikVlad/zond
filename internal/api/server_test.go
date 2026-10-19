@@ -25,7 +25,7 @@ type fakeRunner struct {
 	startErr error
 }
 
-func (f *fakeRunner) Start(source, _ string) (string, error) {
+func (f *fakeRunner) Start(source, _, _ string) (string, error) {
 	if f.startErr != nil {
 		return "", f.startErr
 	}

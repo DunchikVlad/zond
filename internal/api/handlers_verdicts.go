@@ -156,7 +156,7 @@ func (s *Server) handleReview(w http.ResponseWriter, r *http.Request) {
 			"relabel требует поле label", nil)
 		return
 	}
-	v, err := s.st.ApplyReview(r.Context(), id, action, verdict.Label(req.Label), Actor, s.nowFn())
+	v, err := s.st.ApplyReview(r.Context(), id, action, verdict.Label(req.Label), s.actorFromCtx(r), s.nowFn())
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "verdict_not_found", "вердикт не найден",
 			map[string]string{"verdict_id": id})
@@ -214,7 +214,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	// Экспорт — аудируемое действие (п. 14.2): запись до выдачи данных;
 	// ошибка аудита = экспорт не выполняется (fail-closed).
-	if err := s.auditEvent(r.Context(), audit.CatExport, "verdicts_export", "export", map[string]any{
+	if err := s.auditEventAs(r, audit.CatExport, "verdicts_export", "export", map[string]any{
 		"scan_id": scanID, "rows": len(vs), "format": format,
 	}); err != nil {
 		s.internalError(w, r, "аудит экспорта", err)

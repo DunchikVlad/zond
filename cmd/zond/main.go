@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/analyze/meta"
 	"github.com/DunchikVlad/zond/internal/api"
 	"github.com/DunchikVlad/zond/internal/audit"
+	"github.com/DunchikVlad/zond/internal/auth"
 	"github.com/DunchikVlad/zond/internal/config"
 	"github.com/DunchikVlad/zond/internal/connector"
 	_ "github.com/DunchikVlad/zond/internal/connector/clickhouse" // регистрация по конвенции путей
@@ -59,6 +61,8 @@ func run(args []string) int {
 		return runAgentCheck(args[1:])
 	case "audit":
 		return runAudit(args[1:])
+	case "token":
+		return runToken(args[1:])
 	case "serve":
 		return runServe(args[1:])
 	case "help", "-h", "--help":
@@ -327,7 +331,8 @@ func newEngineRunner(b *config.Bundle, st *store.Store, log *slog.Logger, useLLM
 // Start запускает прогон в фоне и возвращает scan_id сразу (п. 11.2 POST
 // /scans → {scan_id}). Источник/профиль/подключение валидируются до старта —
 // клиент получает осмысленную ошибку, а не «прогон умер в фоне».
-func (r *engineRunner) Start(source, profile string) (string, error) {
+// actor — автор аудит-событий прогона (п. 14.2: sso:<subject>/token:<id>/api).
+func (r *engineRunner) Start(source, profile, actor string) (string, error) {
 	src, err := findSource(r.b.Connections, source)
 	if err != nil {
 		return "", &api.BadScanRequestError{Reason: err.Error()}
@@ -387,7 +392,7 @@ func (r *engineRunner) Start(source, profile string) (string, error) {
 			conn.Close()
 		}()
 		cfg := engineConfig(r.b)
-		cfg.Actor = api.Actor // п. 14.2: до SSO прогоны API аудируются как "api"
+		cfg.Actor = actor // п. 14.2: прогон аудируется от имени инициатора
 		eng := scanengine.New(r.st, meta.New(r.b.Taxonomy.Synonyms), cfg)
 		if llm != nil {
 			eng.SetLLM(llm, llmID)
@@ -447,7 +452,21 @@ func runServe(args []string) int {
 	defer st.Close()
 
 	runner := newEngineRunner(b, st, log, *useLLM)
-	srv := api.New(st, log, api.WithRunner(runner), api.WithExportMaxRows(*exportMax))
+	// Аутентификация (инкремент 5в, п. 11.3/п. 14.2): включается sso.enabled
+	// в connections.yaml; admin-token fallback — env CLASSIFIER_ADMIN_TOKEN
+	// при admin_token_fallback=true (bootstrap/аварийный доступ).
+	authCfg := api.AuthConfig{
+		Enabled:  b.Connections.SSO.Enabled,
+		Sessions: auth.NewSessionStore(0),
+	}
+	if b.Connections.SSO.AdminTokenFallback {
+		authCfg.AdminToken = os.Getenv("CLASSIFIER_ADMIN_TOKEN")
+	}
+	if authCfg.Enabled {
+		log.Info("serve: аутентификация включена (SSO/API-токены)",
+			"admin_token_fallback", authCfg.AdminToken != "")
+	}
+	srv := api.New(st, log, api.WithRunner(runner), api.WithExportMaxRows(*exportMax), api.WithAuth(authCfg))
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),
@@ -645,6 +664,117 @@ func runAuditExport(args []string) int {
 	return 0
 }
 
+// ---------------------------------------------------------------------------
+// token (инкремент 5в-3, blueprint п. 14.2): API-токены программного доступа
+// ---------------------------------------------------------------------------
+
+func runToken(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "zond token: поддерживаются 'issue', 'list' и 'revoke'")
+		return 2
+	}
+	switch args[0] {
+	case "issue":
+		return runTokenIssue(args[1:])
+	case "list":
+		return runTokenList(args[1:])
+	case "revoke":
+		return runTokenRevoke(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "zond token: неизвестная подкоманда %q\n", args[0])
+		return 2
+	}
+}
+
+func runTokenIssue(args []string) int {
+	fs := flag.NewFlagSet("token issue", flag.ContinueOnError)
+	dbPath := fs.String("db", "zond.db", "файл Verdict Store (SQLite)")
+	name := fs.String("name", "", "имя токена (назначение, обязательно)")
+	scopesCSV := fs.String("scopes", "read", "области через запятую: read,review,export,admin")
+	ttl := fs.Duration("ttl", 90*24*time.Hour, "срок действия (п. 14.2: default 90 дней)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *name == "" {
+		fmt.Fprintln(os.Stderr, "token issue: флаг -name обязателен")
+		return 2
+	}
+	var scopes []store.Scope
+	for _, sc := range strings.Split(*scopesCSV, ",") {
+		scopes = append(scopes, store.Scope(strings.TrimSpace(sc)))
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "token issue: store: %v\n", err)
+		return 2
+	}
+	defer st.Close()
+	key := store.GenerateTokenKey()
+	tok, err := st.IssueToken(context.Background(), store.NewCallID(), *name, scopes, key, "cli", time.Now().UTC(), *ttl)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "token issue: %v\n", err)
+		return 2
+	}
+	// Ключ показывается ОДИН РАЗ (п. 14.2): в БД — только argon2id-хэш.
+	fmt.Printf("token issue: OK (id %s, scopes %s, expires %s)\n", tok.ID, *scopesCSV, tok.ExpiresAt.Format(time.RFC3339))
+	fmt.Printf("ключ (показывается один раз, сохраните): %s\n", key)
+	return 0
+}
+
+func runTokenList(args []string) int {
+	fs := flag.NewFlagSet("token list", flag.ContinueOnError)
+	dbPath := fs.String("db", "zond.db", "файл Verdict Store (SQLite)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "token list: store: %v\n", err)
+		return 2
+	}
+	defer st.Close()
+	toks, err := st.ListTokens(context.Background())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "token list: %v\n", err)
+		return 2
+	}
+	data, err := json.MarshalIndent(toks, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "token list: %v\n", err)
+		return 2
+	}
+	if toks == nil {
+		data = []byte("[]")
+	}
+	fmt.Println(string(data))
+	return 0
+}
+
+func runTokenRevoke(args []string) int {
+	fs := flag.NewFlagSet("token revoke", flag.ContinueOnError)
+	dbPath := fs.String("db", "zond.db", "файл Verdict Store (SQLite)")
+	id := fs.String("id", "", "id токена (обязательно)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *id == "" {
+		fmt.Fprintln(os.Stderr, "token revoke: флаг -id обязателен")
+		return 2
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "token revoke: store: %v\n", err)
+		return 2
+	}
+	defer st.Close()
+	if err := st.RevokeToken(context.Background(), *id, "cli", time.Now().UTC()); err != nil {
+		fmt.Fprintf(os.Stderr, "token revoke: %v\n", err)
+		return 2
+	}
+	fmt.Printf("token revoke: OK (%s отозван, действие мгновенное)\n", *id)
+	return 0
+}
+
 func usage() {
 	fmt.Fprintln(os.Stderr, "использование:")
 	fmt.Fprintln(os.Stderr, "  zond version")
@@ -654,4 +784,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  zond audit verify [-db zond.db]")
 	fmt.Fprintln(os.Stderr, "  zond audit export [-db zond.db] [-actor x] [-category y] [-since RFC3339] [-scan id] [-out file]")
 	fmt.Fprintln(os.Stderr, "  zond serve [-config configs] [-db zond.db] [-addr 127.0.0.1:8080] [-export-max-rows 50000] [-llm]")
+	fmt.Fprintln(os.Stderr, "  zond token issue -name <имя> -scopes read,export [-ttl 2160h] [-db zond.db]")
+	fmt.Fprintln(os.Stderr, "  zond token list [-db zond.db]")
+	fmt.Fprintln(os.Stderr, "  zond token revoke -id <id> [-db zond.db]")
 }

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/DunchikVlad/zond/internal/audit"
+	"github.com/DunchikVlad/zond/internal/auth"
 	"github.com/DunchikVlad/zond/internal/logging"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 )
@@ -31,16 +32,17 @@ const (
 	CodeInternal          = "internal"
 )
 
-// Actor — автор аудит-событий до появления SSO (п. 14.2; инкремент 5в
-// заменит на sso:<subject>/token:<id>).
+// Actor — автор аудит-событий до появления SSO (п. 14.2; при включённой
+// аутентификации actor берётся из субъекта запроса — actorFromCtx).
 const Actor = "api"
 
 // ScanRunner — запуск и мягкая остановка асинхронных прогонов
 // (POST /api/v1/scans, POST /api/v1/scans/{id}/stop). Реализация —
 // runner поверх scanengine (serve); в тестах — fake.
 type ScanRunner interface {
-	// Start запускает прогон в фоне и возвращает scan_id сразу.
-	Start(source, profile string) (string, error)
+	// Start запускает прогон в фоне и возвращает scan_id сразу;
+	// actor — автор аудит-событий прогона (п. 14.2).
+	Start(source, profile, actor string) (string, error)
 	// Stop мягко останавливает прогон (ctx-отмена; статус interrupted).
 	Stop(scanID string) error
 }
@@ -51,7 +53,8 @@ type Server struct {
 	log     *slog.Logger
 	runner  ScanRunner // nil → POST /scans и stop → 501
 	nowFn   func() time.Time
-	maxRows int // export_max_rows (п. 11.2, default 50 000)
+	maxRows int         // export_max_rows (п. 11.2, default 50 000)
+	auth    *AuthConfig // nil/Disabled → режим 5б (без аутентификации)
 	mux     *http.ServeMux
 }
 
@@ -60,6 +63,10 @@ type Option func(*Server)
 
 // WithRunner подключает запуск сканов (serve-режим).
 func WithRunner(r ScanRunner) Option { return func(s *Server) { s.runner = r } }
+
+// WithAuth включает аутентификацию/авторизацию (инкремент 5в, п. 11.3):
+// SSO-сессии, API-токены, admin-token fallback, RBAC, аудит отказов.
+func WithAuth(c AuthConfig) Option { return func(s *Server) { s.auth = &c } }
 
 // WithExportMaxRows задаёт лимит строк экспорта (п. 11.2).
 func WithExportMaxRows(n int) Option {
@@ -83,10 +90,10 @@ func New(st *store.Store, log *slog.Logger, opts ...Option) *Server {
 	return s
 }
 
-// Handler возвращает корневой http.Handler (middleware: correlation id +
-// access-лог). Используется и serve, и httptest.
+// Handler возвращает корневой http.Handler (middleware: аутентификация →
+// correlation id + access-лог). Используется и serve, и httptest.
 func (s *Server) Handler() http.Handler {
-	return s.withCorrelation(s.mux)
+	return s.withCorrelation(s.withAuth(s.mux))
 }
 
 func (s *Server) routes() {
@@ -94,18 +101,20 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/ready", s.handleReady)
 
-	mux.HandleFunc("POST /api/v1/scans", s.handleScanStart)
-	mux.HandleFunc("GET /api/v1/scans", s.handleScanList)
-	mux.HandleFunc("GET /api/v1/scans/{id}", s.handleScanGet)
-	mux.HandleFunc("POST /api/v1/scans/{id}/stop", s.handleScanStop)
+	// Мутации и экспорт — защищённые действия RBAC (п. 11.3); при включённом
+	// SSO requireAction проверяет субъекта, при выключенном — прозрачно (5б).
+	mux.HandleFunc("POST /api/v1/scans", s.requireAction(auth.ActionScan, s.handleScanStart))
+	mux.HandleFunc("GET /api/v1/scans", s.requireAction(auth.ActionView, s.handleScanList))
+	mux.HandleFunc("GET /api/v1/scans/{id}", s.requireAction(auth.ActionView, s.handleScanGet))
+	mux.HandleFunc("POST /api/v1/scans/{id}/stop", s.requireAction(auth.ActionScan, s.handleScanStop))
 
-	mux.HandleFunc("GET /api/v1/verdicts", s.handleVerdictList)
-	mux.HandleFunc("GET /api/v1/verdicts/{id}", s.handleVerdictGet)
-	mux.HandleFunc("POST /api/v1/verdicts/{id}/review", s.handleReview)
+	mux.HandleFunc("GET /api/v1/verdicts", s.requireAction(auth.ActionView, s.handleVerdictList))
+	mux.HandleFunc("GET /api/v1/verdicts/{id}", s.requireAction(auth.ActionView, s.handleVerdictGet))
+	mux.HandleFunc("POST /api/v1/verdicts/{id}/review", s.requireAction(auth.ActionReview, s.handleReview))
 
-	mux.HandleFunc("GET /api/v1/drift", s.handleDrift)
-	mux.HandleFunc("GET /api/v1/stats/cost", s.handleCost)
-	mux.HandleFunc("GET /api/v1/export", s.handleExport)
+	mux.HandleFunc("GET /api/v1/drift", s.requireAction(auth.ActionView, s.handleDrift))
+	mux.HandleFunc("GET /api/v1/stats/cost", s.requireAction(auth.ActionView, s.handleCost))
+	mux.HandleFunc("GET /api/v1/export", s.requireAction(auth.ActionExport, s.handleExport))
 	s.mux = mux
 }
 
@@ -176,6 +185,16 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 func (s *Server) auditEvent(ctx context.Context, category, action, target string, details map[string]any) error {
 	return s.st.AppendAudit(ctx, []audit.Event{{
 		Actor: Actor, Category: category, Action: action, Target: target,
+		Details: details, TS: s.nowFn().UTC(),
+	}})
+}
+
+// auditEventAs — auditEvent с actor субъекта запроса (инкремент 5в):
+// мутации/экспорт при включённой аутентификации пишутся от sso:<subject>/
+// token:<id>/admin-token, без аутентификации — от api.
+func (s *Server) auditEventAs(r *http.Request, category, action, target string, details map[string]any) error {
+	return s.st.AppendAudit(r.Context(), []audit.Event{{
+		Actor: s.actorFromCtx(r), Category: category, Action: action, Target: target,
 		Details: details, TS: s.nowFn().UTC(),
 	}})
 }

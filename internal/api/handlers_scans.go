@@ -127,7 +127,7 @@ func (s *Server) handleScanStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, CodeInvalidRequest, "поле source обязательно", nil)
 		return
 	}
-	scanID, err := s.runner.Start(req.Source, req.Profile)
+	scanID, err := s.runner.Start(req.Source, req.Profile, s.actorFromCtx(r))
 	if err != nil {
 		var unf *SourceUnavailableError
 		if errors.As(err, &unf) {
@@ -170,7 +170,7 @@ func (s *Server) handleScanStop(w http.ResponseWriter, r *http.Request) {
 	}
 	// Аудит до действия (fail-closed, п. 14.2): остановка без аудита не
 	// считается запрошенной.
-	if err := s.auditEvent(r.Context(), audit.CatScan, "scan_stop", "scan:"+id, nil); err != nil {
+	if err := s.auditEventAs(r, audit.CatScan, "scan_stop", "scan:"+id, nil); err != nil {
 		s.internalError(w, r, "аудит остановки", err)
 		return
 	}
