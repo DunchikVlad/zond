@@ -35,7 +35,7 @@ func TestSaveVerdictsWithCallsRoundTrip(t *testing.T) {
 	mustSaveScan(t, st, "s1")
 	v := testVerdict("v1", "s1")
 	call := testCall("c1", "s1", "v1")
-	if err := st.SaveVerdictsWithCalls(ctx, []verdict.Verdict{v}, []AgentCall{call}); err != nil {
+	if err := st.SaveVerdictsWithCalls(ctx, []verdict.Verdict{v}, []AgentCall{call}, nil); err != nil {
 		t.Fatalf("SaveVerdictsWithCalls: %v", err)
 	}
 	calls, err := st.ListAgentCalls(ctx, "s1")
@@ -74,7 +74,7 @@ func TestSaveVerdictsWithCallsCachedFlag(t *testing.T) {
 	call.Cached = true
 	call.Status = "cache_hit"
 	call.TokensIn, call.TokensOut, call.CostUSD = 0, 0, 0
-	if err := st.SaveVerdictsWithCalls(ctx, nil, []AgentCall{call}); err != nil {
+	if err := st.SaveVerdictsWithCalls(ctx, nil, []AgentCall{call}, nil); err != nil {
 		t.Fatalf("SaveVerdictsWithCalls: %v", err)
 	}
 	calls, _ := st.ListAgentCalls(ctx, "s1")
@@ -90,7 +90,7 @@ func TestSaveVerdictsWithCallsIdempotentVerdict(t *testing.T) {
 	ctx := context.Background()
 	mustSaveScan(t, st, "s1")
 	v := testVerdict("v1", "s1")
-	if err := st.SaveVerdictsWithCalls(ctx, []verdict.Verdict{v}, []AgentCall{testCall("c1", "s1", "v1")}); err != nil {
+	if err := st.SaveVerdictsWithCalls(ctx, []verdict.Verdict{v}, []AgentCall{testCall("c1", "s1", "v1")}, nil); err != nil {
 		t.Fatalf("первая вставка: %v", err)
 	}
 	v.Confidence = 0.5
@@ -115,7 +115,7 @@ func TestSaveVerdictsWithCallsFKViolation(t *testing.T) {
 	mustSaveScan(t, st, "s1")
 	v := testVerdict("v1", "s1")
 	call := testCall("c1", "s1", "ghost-verdict")
-	if err := st.SaveVerdictsWithCalls(ctx, []verdict.Verdict{v}, []AgentCall{call}); err == nil {
+	if err := st.SaveVerdictsWithCalls(ctx, []verdict.Verdict{v}, []AgentCall{call}, nil); err == nil {
 		t.Fatal("FK-нарушение verdict_id должно откатывать транзакцию")
 	}
 	if calls, _ := st.ListAgentCalls(ctx, "s1"); len(calls) != 0 {
@@ -134,7 +134,7 @@ func TestAgentCallBadStatusRejected(t *testing.T) {
 	mustSaveVerdicts(t, st, testVerdict("v1", "s1"))
 	call := testCall("c1", "s1", "v1")
 	call.Status = "weird"
-	if err := st.SaveVerdictsWithCalls(ctx, nil, []AgentCall{call}); err == nil {
+	if err := st.SaveVerdictsWithCalls(ctx, nil, []AgentCall{call}, nil); err == nil {
 		t.Fatal("недопустимый status должен отклоняться CHECK-ограничением")
 	}
 }
@@ -218,7 +218,7 @@ func TestListAgentCallsOrdersByCreatedAt(t *testing.T) {
 	for i, id := range []string{"c-earlier", "c-later"} {
 		call := testCall(id, "s1", "v1")
 		call.CreatedAt = base.Add(time.Duration(i) * time.Second)
-		if err := st.SaveVerdictsWithCalls(ctx, nil, []AgentCall{call}); err != nil {
+		if err := st.SaveVerdictsWithCalls(ctx, nil, []AgentCall{call}, nil); err != nil {
 			t.Fatalf("вставка %s: %v", id, err)
 		}
 	}

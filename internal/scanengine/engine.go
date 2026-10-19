@@ -23,6 +23,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/analyze/cluster"
 	"github.com/DunchikVlad/zond/internal/analyze/meta"
 	"github.com/DunchikVlad/zond/internal/analyze/rules"
+	"github.com/DunchikVlad/zond/internal/audit"
 	"github.com/DunchikVlad/zond/internal/connector"
 	"github.com/DunchikVlad/zond/internal/ensemble"
 	"github.com/DunchikVlad/zond/internal/fingerprint"
@@ -56,6 +57,10 @@ type Config struct {
 
 	// Инкремент 4в: budget-стоп LLM-слоя (blueprint п. 10.4).
 	CostScanLimitUSD float64 // суммарная стоимость вызовов скана; >0 — при превышении LLM-вызовы прекращаются
+
+	// Инкремент 5а: аудит действий (ADR-0013, п. 14.2) — автор событий
+	// скана ("cli" по умолчанию; в этапе 5 — sso:<subject>/token:<id>).
+	Actor string
 }
 
 // LLMIdentity — идентичность агента для учётных записей agent_calls
@@ -91,6 +96,11 @@ type Engine struct {
 	cost           float64
 	budgetExceeded bool
 	prices         map[string]modelPrice // ленивый кэш прайс-листа model_prices
+
+	// Инкремент 5а: буфер аудит-событий таблицы (ADR-0013): пишется в той же
+	// транзакции, что вердикты и вызовы (п. 13/14.2). 1:1 с calls (п. 14.2:
+	// каждый вызов агента — событие со ссылкой на agent_calls).
+	events []audit.Event
 }
 
 // modelPrice — цена модели за 1M токенов (п. 11.1) из кэша движка.
@@ -200,6 +210,14 @@ func (e *Engine) Scan(ctx context.Context, conn connector.Connector, sourceName,
 	}); err != nil {
 		return nil, fmt.Errorf("создание прогона: %w", err)
 	}
+	// Аудит старта скана (ADR-0013, п. 14.2): запись обязательна — ошибка
+	// аудита отменяет скан (действие без аудита не считается совершённым).
+	if err := e.st.AppendAudit(ctx, []audit.Event{e.scanEvent(scanID, "scan_start", map[string]any{
+		"source": sourceName, "profile": profile,
+	})}); err != nil {
+		_ = e.st.FinishScan(ctx, scanID, "failed", "{}", e.nowFn())
+		return nil, fmt.Errorf("аудит старта скана: %w", err)
+	}
 	if e.cfg.Clustering {
 		e.clusterer = cluster.New(e.cfg.ClusterSimilarity, e.cfg.ClusterMaxSize)
 	} else {
@@ -212,7 +230,8 @@ func (e *Engine) Scan(ctx context.Context, conn connector.Connector, sourceName,
 
 	tables, err := conn.ListTables(ctx)
 	if err != nil {
-		e.finish(ctx, rep, "failed")
+		// аудит finish на пути уже падающего скана — best effort (п. 14.2)
+		_ = e.finish(ctx, rep, "failed")
 		return rep, fmt.Errorf("list tables: %w", err)
 	}
 	rep.TablesTotal = len(tables)
@@ -243,11 +262,16 @@ func (e *Engine) Scan(ctx context.Context, conn connector.Connector, sourceName,
 	if err := e.aggregate(ctx, rep); err != nil {
 		return rep, err
 	}
-	e.finish(ctx, rep, status)
+	if err := e.finish(ctx, rep, status); err != nil {
+		return rep, err
+	}
 	return rep, nil
 }
 
-func (e *Engine) finish(ctx context.Context, rep *Report, status string) {
+// finish фиксирует завершение прогона: статус + stats_json + аудит scan_finish
+// (ADR-0013, п. 14.2). Ошибка аудита возвращается — вызывающий решает
+// (на основном пути скан считается несостоявшимся, код возврата ненулевой).
+func (e *Engine) finish(ctx context.Context, rep *Report, status string) error {
 	rep.Status = status
 	rep.FinishedAt = e.nowFn()
 	stats, _ := json.Marshal(map[string]any{
@@ -260,6 +284,30 @@ func (e *Engine) finish(ctx context.Context, rep *Report, status string) {
 		"cost_usd": rep.CostUSD,
 	})
 	_ = e.st.FinishScan(ctx, rep.ScanID, status, string(stats), rep.FinishedAt)
+	return e.st.AppendAudit(ctx, []audit.Event{e.scanEvent(rep.ScanID, "scan_finish", map[string]any{
+		"status": status, "duration_s": rep.FinishedAt.Sub(rep.StartedAt).Seconds(),
+		"tables_total": rep.TablesTotal, "tables_done": rep.TablesDone,
+		"tables_failed": rep.TablesFailed, "verdicts": rep.Verdicts,
+		"pending": rep.Pending, "llm_calls": rep.LLMCalls, "cache_hits": rep.CacheHits,
+		"cluster_propagated": rep.ClusterPropagated, "llm_errors": rep.LLMErrors,
+		"tokens_in": rep.TokensIn, "tokens_out": rep.TokensOut, "cost_usd": rep.CostUSD,
+	})})
+}
+
+// scanEvent собирает аудит-событие жизненного цикла скана (actor из Config).
+func (e *Engine) scanEvent(scanID, action string, details map[string]any) audit.Event {
+	return audit.Event{
+		Actor: e.actor(), Category: audit.CatScan, Action: action,
+		Target: "scan:" + scanID, Details: details, TS: e.nowFn(),
+	}
+}
+
+// actor — автор аудит-событий (п. 14.2): CLI до появления SSO/API-токенов.
+func (e *Engine) actor() string {
+	if e.cfg.Actor != "" {
+		return e.cfg.Actor
+	}
+	return "cli"
 }
 
 func (e *Engine) aggregate(ctx context.Context, rep *Report) error {
@@ -282,6 +330,7 @@ func (e *Engine) aggregate(ctx context.Context, rep *Report) error {
 
 func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID string, t connector.TableRef, rep *Report) error {
 	e.takeCalls() // сброс буфера: вызовы failed-таблицы не должны попасть в чужой коммит (п. 13)
+	e.takeEvents()
 	cols, err := conn.GetSchema(ctx, t)
 	if err != nil {
 		_ = e.st.MarkTable(ctx, scanID, t.Name, 0, "failed", err.Error())
@@ -301,9 +350,9 @@ func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID
 		}
 		vs = append(vs, v)
 	}
-	// вердикты и учётные записи вызовов — одна транзакция (п. 13:
-	// либо agent_calls+verdicts, либо откат)
-	if err := e.st.SaveVerdictsWithCalls(ctx, vs, e.takeCalls()); err != nil {
+	// вердикты, учётные записи вызовов и аудит таблицы — одна транзакция
+	// (п. 13: либо всё, либо откат; ADR-0013: действие без аудита не совершено)
+	if err := e.st.SaveVerdictsWithCalls(ctx, vs, e.takeCalls(), e.takeEvents()); err != nil {
 		_ = e.st.MarkTable(ctx, scanID, t.Name, rowCount, "failed", err.Error())
 		return err
 	}
@@ -578,10 +627,11 @@ func (e *Engine) verifyGray(ctx context.Context, col connector.Column, pool *sam
 	}, e.cfg.TauAccept)
 }
 
-// recordCall копит учётную запись вызова (п. 10.6) в буфере таблицы; коммит —
-// вместе с вердиктами (п. 13). Стоимость и токены накапливаются только по
-// реальным ok-вызовам; при достижении cost_scan_limit_usd ставится
-// budgetExceeded (п. 10.4).
+// recordCall копит учётную запись вызова (п. 10.6) и парное аудит-событие
+// (п. 14.2: каждый вызов агента — событие со ссылкой на agent_calls) в буфере
+// таблицы; коммит — вместе с вердиктами (п. 13). Стоимость и токены
+// накапливаются только по реальным ok-вызовам; при достижении
+// cost_scan_limit_usd ставится budgetExceeded (п. 10.4).
 func (e *Engine) recordCall(v *verdict.Verdict, call store.AgentCall) {
 	call.ID = store.NewCallID()
 	call.ScanID = v.ScanID
@@ -594,6 +644,17 @@ func (e *Engine) recordCall(v *verdict.Verdict, call store.AgentCall) {
 	}
 	call.CreatedAt = e.nowFn()
 	e.calls = append(e.calls, call)
+	e.events = append(e.events, audit.Event{
+		Actor: e.actor(), Category: audit.CatAgent, Action: "agent_call",
+		Target: "agent:" + call.AgentID, TS: call.CreatedAt,
+		Details: map[string]any{
+			"call_id": call.ID, "scan_id": call.ScanID, "verdict_id": call.VerdictID,
+			"model": call.Model, "prompt_version": call.PromptVersion,
+			"status": call.Status, "cached": call.Cached,
+			"tokens_in": call.TokensIn, "tokens_out": call.TokensOut,
+			"cost_usd": call.CostUSD, "latency_ms": call.LatencyMS,
+		},
+	})
 	if call.Status == "ok" && !call.Cached {
 		e.cost += call.CostUSD
 		e.stats.tokensIn += call.TokensIn
@@ -610,6 +671,13 @@ func (e *Engine) takeCalls() []store.AgentCall {
 	calls := e.calls
 	e.calls = nil
 	return calls
+}
+
+// takeEvents — буфер аудит-событий таблицы (ADR-0013), коммит с вердиктами.
+func (e *Engine) takeEvents() []audit.Event {
+	events := e.events
+	e.events = nil
+	return events
 }
 
 // callCost — стоимость вызова по прайс-листу model_prices (п. 11.1):

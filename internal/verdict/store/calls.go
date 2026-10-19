@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/DunchikVlad/zond/internal/audit"
 	"github.com/DunchikVlad/zond/internal/verdict"
 )
 
@@ -39,11 +40,12 @@ func NewCallID() string {
 	return hex.EncodeToString(b[:])
 }
 
-// SaveVerdictsWithCalls атомарно сохраняет вердикты и учётные записи вызовов
-// в ОДНОЙ транзакции (blueprint п. 13): либо agent_calls+verdicts, либо откат —
-// «висящих» вердиктов без учётной записи быть не должно.
-func (s *Store) SaveVerdictsWithCalls(ctx context.Context, vs []verdict.Verdict, calls []AgentCall) error {
-	if len(vs) == 0 && len(calls) == 0 {
+// SaveVerdictsWithCalls атомарно сохраняет вердикты, учётные записи вызовов
+// и аудит-события таблицы в ОДНОЙ транзакции (blueprint п. 13, п. 14.2):
+// либо всё вместе, либо откат — «висящих» вердиктов без учётной записи и
+// действий без аудита быть не должно. events — пустой срез = без аудита.
+func (s *Store) SaveVerdictsWithCalls(ctx context.Context, vs []verdict.Verdict, calls []AgentCall, events []audit.Event) error {
+	if len(vs) == 0 && len(calls) == 0 && len(events) == 0 {
 		return nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -62,14 +64,19 @@ func (s *Store) SaveVerdictsWithCalls(ctx context.Context, vs []verdict.Verdict,
 			return err
 		}
 	}
+	if len(events) > 0 {
+		if err := audit.AppendTx(ctx, tx, events); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
 // SaveVerdicts атомарно сохраняет вердикты; повторная вставка того же id
 // заменяет запись (идемпотентность, blueprint п. 5.4/п. 13). Обёртка над
-// SaveVerdictsWithCalls без учётных записей — API этапа 1 сохранён.
+// SaveVerdictsWithCalls без учётных записей и аудита — API этапа 1 сохранён.
 func (s *Store) SaveVerdicts(ctx context.Context, vs []verdict.Verdict) error {
-	return s.SaveVerdictsWithCalls(ctx, vs, nil)
+	return s.SaveVerdictsWithCalls(ctx, vs, nil, nil)
 }
 
 // insertVerdicts — вставка вердиктов внутри транзакции (было телом SaveVerdicts).

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/DunchikVlad/zond/internal/agentproxy"
 	"github.com/DunchikVlad/zond/internal/analyze/meta"
+	"github.com/DunchikVlad/zond/internal/audit"
 	"github.com/DunchikVlad/zond/internal/config"
 	"github.com/DunchikVlad/zond/internal/connector"
 	_ "github.com/DunchikVlad/zond/internal/connector/clickhouse" // регистрация по конвенции путей
@@ -46,6 +48,8 @@ func run(args []string) int {
 		return runScan(args[1:])
 	case "agent-check":
 		return runAgentCheck(args[1:])
+	case "audit":
+		return runAudit(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return 0
@@ -337,10 +341,125 @@ func runAgentCheck(args []string) int {
 	return 0
 }
 
+// ---------------------------------------------------------------------------
+// audit (инкремент 5а, ADR-0013): verify — пересчёт hash-chain; export —
+// выгрузка событий (просмотр в штатном режиме — только роль admin, п. 14.2;
+// без SSO actor="cli", RBAC приходит в этапе 5b).
+// ---------------------------------------------------------------------------
+
+func runAudit(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "zond audit: поддерживаются 'verify' и 'export'")
+		return 2
+	}
+	switch args[0] {
+	case "verify":
+		return runAuditVerify(args[1:])
+	case "export":
+		return runAuditExport(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "zond audit: неизвестная подкоманда %q\n", args[0])
+		return 2
+	}
+}
+
+func runAuditVerify(args []string) int {
+	fs := flag.NewFlagSet("audit verify", flag.ContinueOnError)
+	dbPath := fs.String("db", "zond.db", "файл Verdict Store (SQLite)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit verify: store: %v\n", err)
+		return 2
+	}
+	defer st.Close()
+	rep, err := st.AuditVerify(context.Background())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit verify: %v\n", err)
+		return 2
+	}
+	if !rep.OK() {
+		fmt.Printf("audit verify: FAIL — разрыв цепочки на seq=%d: %s (runbook: docs/runbooks/audit-hash-chain-broken.md)\n",
+			rep.BrokenAt, rep.Reason)
+		return 1
+	}
+	fmt.Printf("audit verify: OK (%d записей, hash-chain сходится)\n", rep.Checked)
+	return 0
+}
+
+func runAuditExport(args []string) int {
+	fs := flag.NewFlagSet("audit export", flag.ContinueOnError)
+	dbPath := fs.String("db", "zond.db", "файл Verdict Store (SQLite)")
+	actor := fs.String("actor", "", "фильтр: автор события")
+	category := fs.String("category", "", "фильтр: категория (scan|agent|export|…)")
+	since := fs.String("since", "", "фильтр: не раньше (RFC3339)")
+	scanID := fs.String("scan", "", "фильтр: события скана")
+	out := fs.String("out", "", "файл вывода (по умолчанию stdout)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	var sinceT *time.Time
+	if *since != "" {
+		t, err := time.Parse(time.RFC3339, *since)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "audit export: -since: %v (формат RFC3339)\n", err)
+			return 2
+		}
+		sinceT = &t
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit export: store: %v\n", err)
+		return 2
+	}
+	defer st.Close()
+	f := audit.Filter{Actor: *actor, Category: *category, Since: sinceT, ScanID: *scanID}
+	entries, err := st.AuditList(context.Background(), f)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit export: выборка: %v\n", err)
+		return 2
+	}
+	// Экспорт — аудируемое действие (п. 14.2): запись до выдачи данных;
+	// ошибка аудита = экспорт не выполняется (fail-closed).
+	if err := st.AppendAudit(context.Background(), []audit.Event{{
+		Actor: "cli", Category: audit.CatExport, Action: "audit_export",
+		Target: "export", TS: time.Now().UTC(),
+		Details: map[string]any{
+			"rows": len(entries), "format": "json",
+			"filters": map[string]any{"actor": *actor, "category": *category, "since": *since, "scan": *scanID},
+		},
+	}}); err != nil {
+		fmt.Fprintf(os.Stderr, "audit export: аудит экспорта: %v\n", err)
+		return 2
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit export: сериализация: %v\n", err)
+		return 2
+	}
+	if entries == nil {
+		data = []byte("[]") // пустой журнал — валидный пустой массив, не null
+	}
+	if *out == "" {
+		fmt.Println(string(data))
+		return 0
+	}
+	if err := os.WriteFile(*out, append(data, '\n'), 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "audit export: запись файла: %v\n", err)
+		return 2
+	}
+	fmt.Printf("audit export: OK (%d записей → %s)\n", len(entries), *out)
+	return 0
+}
+
 func usage() {
 	fmt.Fprintln(os.Stderr, "использование:")
 	fmt.Fprintln(os.Stderr, "  zond version")
 	fmt.Fprintln(os.Stderr, "  zond config validate [-dir configs]")
 	fmt.Fprintln(os.Stderr, "  zond scan -source <имя> [-config configs] [-db zond.db] [-profile quick|deep|custom] [-llm]")
 	fmt.Fprintln(os.Stderr, "  zond agent-check [-config configs] [-online]")
+	fmt.Fprintln(os.Stderr, "  zond audit verify [-db zond.db]")
+	fmt.Fprintln(os.Stderr, "  zond audit export [-db zond.db] [-actor x] [-category y] [-since RFC3339] [-scan id] [-out file]")
 }
