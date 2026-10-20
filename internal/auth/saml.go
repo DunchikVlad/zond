@@ -225,13 +225,13 @@ func (sp *SP) buildMiddleware(metadataXML []byte) (*samlsp.Middleware, error) {
 		entityID = base.String() + "saml/metadata"
 	}
 	m, err := samlsp.New(samlsp.Options{
-		EntityID:    entityID,
-		URL:         *base,
-		Key:         sp.key,
-		Certificate: sp.cert,
-		IDPMetadata: idp,
-		SignRequest: true,
-		CookieSameSite: sp.samesite,
+		EntityID:           entityID,
+		URL:                *base,
+		Key:                sp.key,
+		Certificate:        sp.cert,
+		IDPMetadata:        idp,
+		SignRequest:        true,
+		CookieSameSite:     sp.samesite,
 		DefaultRedirectURI: "/",
 	})
 	if err != nil {

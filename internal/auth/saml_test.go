@@ -95,7 +95,10 @@ func TestSessionProviderCreateSession(t *testing.T) {
 	var audited []string
 	sp, err := NewSP(testSAMLConfig(), sessions, Hooks{
 		UpsertUser: func(ctx context.Context, rec UserRec) error { jit = rec; return nil },
-		Audit:      func(ctx context.Context, actor, action, target string, d map[string]any) error { audited = append(audited, action); return nil },
+		Audit: func(ctx context.Context, actor, action, target string, d map[string]any) error {
+			audited = append(audited, action)
+			return nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewSP: %v", err)

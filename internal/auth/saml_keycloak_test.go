@@ -44,7 +44,7 @@ func startKeycloak(t *testing.T) (baseURL string, term func()) {
 			ContainerFilePath: "/opt/keycloak/data/import/realm-zond.json",
 			FileMode:          0o644,
 		}},
-		Cmd:  []string{"start-dev", "--import-realm"},
+		Cmd:        []string{"start-dev", "--import-realm"},
 		WaitingFor: wait.ForHTTP("/realms/zond").WithPort("8080/tcp").WithStartupTimeout(3 * time.Minute),
 	}
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{

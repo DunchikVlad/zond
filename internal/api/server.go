@@ -53,8 +53,8 @@ type Server struct {
 	log     *slog.Logger
 	runner  ScanRunner // nil → POST /scans и stop → 501
 	nowFn   func() time.Time
-	maxRows int         // export_max_rows (п. 11.2, default 50 000)
-	auth    *AuthConfig // nil/Disabled → режим 5б (без аутентификации)
+	maxRows int          // export_max_rows (п. 11.2, default 50 000)
+	auth    *AuthConfig  // nil/Disabled → режим 5б (без аутентификации)
 	saml    http.Handler // SSO-эндпоинты (5в-5); nil → SSO не поднят
 	mux     *http.ServeMux
 }
