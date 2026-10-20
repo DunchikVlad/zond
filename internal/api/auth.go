@@ -53,8 +53,11 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// liveness/readiness — без аутентификации (оркестратор/пробы, п. 15).
-		if r.URL.Path == "/api/health" || r.URL.Path == "/api/ready" {
+		// liveness/readiness и SSO-эндпоинты — без аутентификации: health —
+		// для оркестратора/проб (п. 15), /saml/* — точки входа входа и
+		// приёмка ACS/SLO от IdP (анонимность по построению протокола, 5в-5).
+		if r.URL.Path == "/api/health" || r.URL.Path == "/api/ready" ||
+			strings.HasPrefix(r.URL.Path, "/saml/") {
 			next.ServeHTTP(w, r)
 			return
 		}

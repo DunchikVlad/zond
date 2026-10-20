@@ -144,6 +144,21 @@ func (s *SessionStore) Delete(id string) {
 	s.mu.Unlock()
 }
 
+// DeleteBySubject завершает все сессии субъекта (IdP-initiated SLO по
+// NameID: cookie в SLO-запросе от IdP может отсутствовать, п. 11.3).
+func (s *SessionStore) DeleteBySubject(subject string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, sess := range s.sessions {
+		if sess.Subject == subject {
+			delete(s.sessions, id)
+			n++
+		}
+	}
+	return n
+}
+
 // Len — число живых сессий (наблюдаемость, тесты).
 func (s *SessionStore) Len() int {
 	s.mu.Lock()

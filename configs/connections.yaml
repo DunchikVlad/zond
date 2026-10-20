@@ -22,10 +22,15 @@ sources:
     uri: "${MONGO_PROD_URI}"
 
 sso:
-  enabled: false # dev-контур: только admin-токен; IdP-подключение — этап 5 (ADR-0011)
-  entity_id: "https://classifier.example.com/saml/metadata"
-  acs_url: "https://classifier.example.com/saml/acs"
-  idp_metadata_url: "${IDP_METADATA_URL}" # либо idp_metadata_file: ./idp.xml
+  enabled: false # dev-контур: только admin-токен; SAML SP — инкремент 5в-5 (ADR-0011)
+  entity_id: "https://zond.example.com/saml/metadata"
+  acs_url: "https://zond.example.com/saml/acs" # публичный адрес SP (за TLS-прокси)
+  idp_metadata_url: "${IDP_METADATA_URL}" # либо idp_metadata_file: ./idp.xml; refresh — 24 ч
   name_id_format: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"
-  role_attribute: "Role"
-  admin_token_fallback: true
+  role_attribute: "Role" # SAML-атрибут/группы → роли admin/viewer (MaxRole, п. 11.3)
+  admin_token_fallback: true # env CLASSIFIER_ADMIN_TOKEN — bootstrap/аварийный
+  # Ключи подписи SP (п. 11.3: файл в конфигурации; ротация «добавить → раскатать → убрать»).
+  # Не заданы — ephemeral self-signed на старте (только dev/демо).
+  # sp_certificate_file: ./deploy/saml/sp.crt
+  # sp_key_file: ./deploy/saml/sp.key
+  # cookie_samesite: lax # lax (default) | none (prod за TLS; http-dev + lax: tracked-cookie может не дойти до POST ACS у части браузеров)

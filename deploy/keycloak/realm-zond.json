@@ -1,0 +1,60 @@
+{
+  "realm": "zond",
+  "enabled": true,
+  "displayName": "zond (dev IdP)",
+  "roles": {
+    "realm": [
+      { "name": "admin", "description": "администратор zond (п. 11.3)" },
+      { "name": "viewer", "description": "наблюдатель zond" }
+    ]
+  },
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "firstName": "Ада",
+      "lastName": "Администраторова",
+      "email": "admin@zond.example",
+      "credentials": [{ "type": "password", "value": "admin123", "temporary": false }],
+      "realmRoles": ["admin"]
+    },
+    {
+      "username": "viewer",
+      "enabled": true,
+      "firstName": "Виктор",
+      "lastName": "Вьюверов",
+      "email": "viewer@zond.example",
+      "credentials": [{ "type": "password", "value": "viewer123", "temporary": false }],
+      "realmRoles": ["viewer"]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "zond",
+      "name": "zond SP",
+      "enabled": true,
+      "protocol": "saml",
+      "redirectUris": ["http://127.0.0.1:*", "http://localhost:*", "https://zond.example.com/*"],
+      "baseUrl": "https://zond.example.com/",
+      "adminUrl": "https://zond.example.com/",
+      "attributes": {
+        "saml.assertion.signature": "true",
+        "saml.force.post.binding": "true",
+        "saml.server.signature": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "role-attribute",
+          "protocol": "saml",
+          "protocolMapper": "saml-role-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "attribute.name": "Role",
+            "friendly.name": "Role",
+            "attribute.nameformat": "Basic"
+          }
+        }
+      ]
+    }
+  ]
+}

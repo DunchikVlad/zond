@@ -203,9 +203,10 @@ func (s *Store) ApplyReview(ctx context.Context, verdictID string, action Review
 	}
 
 	finalLabel := string(v.FinalLabel)
-	if action == ReviewRelabel {
+	switch action {
+	case ReviewRelabel:
 		finalLabel = string(newLabel)
-	} else if action == ReviewReject {
+	case ReviewReject:
 		finalLabel = "" // отклонение снимает ручной лейбл
 	}
 	res, err := tx.ExecContext(ctx, `

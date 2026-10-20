@@ -136,6 +136,16 @@ type SSO struct {
 	NameIDFormat       string `yaml:"name_id_format"`
 	RoleAttribute      string `yaml:"role_attribute"`
 	AdminTokenFallback bool   `yaml:"admin_token_fallback"`
+
+	// Инкремент 5в-5: ключи подписи SP (п. 11.3: сертификат из конфигурации,
+	// ротация «добавить новый → раскатать → убрать старый»). Не заданы —
+	// ephemeral self-signed на старте (dev/демо, предупреждение в лог/аудит).
+	SPCertificateFile string `yaml:"sp_certificate_file"`
+	SPKeyFile         string `yaml:"sp_key_file"`
+	// CookieSameSite — lax (default, http-dev) | none (prod за TLS + Secure).
+	// На http с lax часть браузеров не пошлёт tracked-request cookie на POST
+	// ACS (п. 14 SameSite=Lax) — prod-развёртывание обязано использовать https.
+	CookieSameSite string `yaml:"cookie_samesite"`
 }
 
 // Validate — fail-fast проверка схемы connections.yaml.
@@ -168,6 +178,11 @@ func (c *Connections) Validate() error {
 		}
 		if c.SSO.RoleAttribute == "" {
 			errs = append(errs, errors.New("sso: role_attribute обязателен при enabled: true"))
+		}
+		switch c.SSO.CookieSameSite {
+		case "", "lax", "none":
+		default:
+			errs = append(errs, fmt.Errorf("sso: cookie_samesite допустимы lax|none, получено %q", c.SSO.CookieSameSite))
 		}
 	}
 	return errors.Join(errs...)

@@ -455,9 +455,10 @@ func runServe(args []string) int {
 	// Аутентификация (инкремент 5в, п. 11.3/п. 14.2): включается sso.enabled
 	// в connections.yaml; admin-token fallback — env CLASSIFIER_ADMIN_TOKEN
 	// при admin_token_fallback=true (bootstrap/аварийный доступ).
+	sessions := auth.NewSessionStore(0)
 	authCfg := api.AuthConfig{
 		Enabled:  b.Connections.SSO.Enabled,
-		Sessions: auth.NewSessionStore(0),
+		Sessions: sessions,
 	}
 	if b.Connections.SSO.AdminTokenFallback {
 		authCfg.AdminToken = os.Getenv("CLASSIFIER_ADMIN_TOKEN")
@@ -466,7 +467,55 @@ func runServe(args []string) int {
 		log.Info("serve: аутентификация включена (SSO/API-токены)",
 			"admin_token_fallback", authCfg.AdminToken != "")
 	}
-	srv := api.New(st, log, api.WithRunner(runner), api.WithExportMaxRows(*exportMax), api.WithAuth(authCfg))
+	var opts []api.Option
+	opts = append(opts, api.WithRunner(runner), api.WithExportMaxRows(*exportMax), api.WithAuth(authCfg))
+	// SAML SP (инкремент 5в-5, ADR-0011): метаданные IdP — при старте
+	// (fail-fast при недоступности, п. 11.3), refresh каждые 24 ч.
+	var sp *auth.SP
+	if b.Connections.SSO.Enabled {
+		metadataXML, err := auth.FetchMetadata(b.Connections.SSO.IDPMetadataURL, b.Connections.SSO.IDPMetadataFile, nil)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "serve:", err)
+			return 2
+		}
+		sp, err = auth.NewSP(auth.SAMLConfig{
+			EntityID:       b.Connections.SSO.EntityID,
+			ACSURL:         b.Connections.SSO.ACSURL,
+			NameIDFormat:   b.Connections.SSO.NameIDFormat,
+			RoleAttribute:  b.Connections.SSO.RoleAttribute,
+			CookieSameSite: b.Connections.SSO.CookieSameSite,
+			KeyFile:        b.Connections.SSO.SPKeyFile,
+			CertFile:       b.Connections.SSO.SPCertificateFile,
+			MetadataXML:    metadataXML,
+		}, sessions, auth.Hooks{
+			UpsertUser: func(ctx context.Context, rec auth.UserRec) error {
+				return st.UpsertUser(ctx, &store.User{
+					Subject: rec.Subject, DisplayName: rec.DisplayName,
+					Role: string(rec.Role), LastLoginAt: time.Now().UTC(),
+				}, time.Now().UTC())
+			},
+			Audit: func(ctx context.Context, actor, action, target string, details map[string]any) error {
+				return st.AppendAudit(ctx, []audit.Event{{
+					Actor: actor, Category: audit.CatAuth, Action: action, Target: target,
+					Details: details, TS: time.Now().UTC(),
+				}})
+			},
+			Log: func(msg string, args ...any) { log.Warn(msg, args...) },
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "serve: sso:", err)
+			return 2
+		}
+		opts = append(opts, api.WithSAML(sp.Handler()))
+		log.Info("serve: SAML SP готов", "entity_id", b.Connections.SSO.EntityID)
+	}
+	serveCtx, stopRefresh := context.WithCancel(context.Background())
+	defer stopRefresh()
+	if sp != nil {
+		go sp.RunMetadataRefresh(serveCtx, b.Connections.SSO.IDPMetadataURL,
+			b.Connections.SSO.IDPMetadataFile, nil, 24*time.Hour)
+	}
+	srv := api.New(st, log, opts...)
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),

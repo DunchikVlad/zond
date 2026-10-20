@@ -55,6 +55,7 @@ type Server struct {
 	nowFn   func() time.Time
 	maxRows int         // export_max_rows (п. 11.2, default 50 000)
 	auth    *AuthConfig // nil/Disabled → режим 5б (без аутентификации)
+	saml    http.Handler // SSO-эндпоинты (5в-5); nil → SSO не поднят
 	mux     *http.ServeMux
 }
 
@@ -76,6 +77,11 @@ func WithExportMaxRows(n int) Option {
 		}
 	}
 }
+
+// WithSAML монтирует SSO-эндпоинты SP (5в-5, ADR-0011): /saml/metadata,
+// login, acs, logout, slo. Маршруты вне аутентификации (точки входа входа
+// и приёмка ответов IdP — анонимны по построению протокола).
+func WithSAML(h http.Handler) Option { return func(s *Server) { s.saml = h } }
 
 // New собирает сервер поверх store; log nil → discard.
 func New(st *store.Store, log *slog.Logger, opts ...Option) *Server {
@@ -115,6 +121,9 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /api/v1/drift", s.requireAction(auth.ActionView, s.handleDrift))
 	mux.HandleFunc("GET /api/v1/stats/cost", s.requireAction(auth.ActionView, s.handleCost))
 	mux.HandleFunc("GET /api/v1/export", s.requireAction(auth.ActionExport, s.handleExport))
+	if s.saml != nil {
+		mux.Handle("/saml/", s.saml)
+	}
 	s.mux = mux
 }
 

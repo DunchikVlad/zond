@@ -1,0 +1,18 @@
+# Dev/demo IdP для zond (blueprint п. 16.5): Keycloak с импортом realm zond.
+# Подъём: docker compose -f deploy/docker-compose.keycloak.yml up -d
+# Realm: клиент zond (SAML), пользователи admin/admin123 (роль admin) и
+# viewer/viewer123 (роль viewer). redirectUris допускают loopback — для
+# тестов и serve на 127.0.0.1; прод — со своим URL и сертификатами SP.
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0.6
+    container_name: zond-keycloak
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    command: start-dev --import-realm
+    volumes:
+      - ./keycloak/realm-zond.json:/opt/keycloak/data/import/realm-zond.json:ro
+    ports:
+      - "8180:8080"
