@@ -30,8 +30,10 @@ import (
 	_ "github.com/DunchikVlad/zond/internal/connector/mongodb"    // регистрация по конвенции путей
 	"github.com/DunchikVlad/zond/internal/logging"
 	"github.com/DunchikVlad/zond/internal/scanengine"
+	"github.com/DunchikVlad/zond/internal/scheduler"
 	"github.com/DunchikVlad/zond/internal/verdict"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
+	"github.com/DunchikVlad/zond/internal/web"
 )
 
 // Version и Commit заполняются при сборке (Makefile, -ldflags).
@@ -435,6 +437,7 @@ func runServe(args []string) int {
 	addr := fs.String("addr", "127.0.0.1:8080", "адрес HTTP-сервера (до SSO — только loopback, ADR-impl-5б)")
 	exportMax := fs.Int("export-max-rows", 50000, "лимит строк экспорта (п. 11.2)")
 	useLLM := fs.Bool("llm", false, "подключить LLM-слой при старте сканов через API")
+	useSched := fs.Bool("scheduler", true, "запускать встроенный планировщик (TTL-кэш, retention, пересканы)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -516,9 +519,34 @@ func runServe(args []string) int {
 			b.Connections.SSO.IDPMetadataFile, nil, 24*time.Hour)
 	}
 	srv := api.New(st, log, opts...)
+	// Веб-UI (инкремент 5г, п. 11.3): корневой mux — /api/ и /saml/ у
+	// API-сервера, всё остальное (страницы) — у web-сервера (ADR-0007,
+	// server-rendered + HTMX из embed.FS).
+	webSrv, err := web.New(st, log, sessions, b.Connections.SSO.Enabled, runner, b)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "serve: web:", err)
+		return 2
+	}
+	root := http.NewServeMux()
+	root.Handle("/api/", srv.Handler())
+	root.Handle("/saml/", srv.Handler())
+	root.Handle("/", webSrv.Handler())
+
+	// Планировщик (инкремент 5г, п. 15/15.4): TTL-прочистка кэша, retention
+	// сканов (90 дней), расписания пересканов источников (schedule).
+	sched := scheduler.New(st, runner, log, b.Connections.Sources)
+	if *useSched {
+		if err := sched.Start(context.Background()); err != nil {
+			fmt.Fprintln(os.Stderr, "serve: scheduler:", err)
+			return 2
+		}
+		defer sched.Stop()
+		log.Info("serve: планировщик запущен")
+	}
+
 	httpSrv := &http.Server{
 		Addr:              *addr,
-		Handler:           srv.Handler(),
+		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -832,7 +860,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  zond agent-check [-config configs] [-online]")
 	fmt.Fprintln(os.Stderr, "  zond audit verify [-db zond.db]")
 	fmt.Fprintln(os.Stderr, "  zond audit export [-db zond.db] [-actor x] [-category y] [-since RFC3339] [-scan id] [-out file]")
-	fmt.Fprintln(os.Stderr, "  zond serve [-config configs] [-db zond.db] [-addr 127.0.0.1:8080] [-export-max-rows 50000] [-llm]")
+	fmt.Fprintln(os.Stderr, "  zond serve [-config configs] [-db zond.db] [-addr 127.0.0.1:8080] [-export-max-rows 50000] [-llm] [-scheduler]")
 	fmt.Fprintln(os.Stderr, "  zond token issue -name <имя> -scopes read,export [-ttl 2160h] [-db zond.db]")
 	fmt.Fprintln(os.Stderr, "  zond token list [-db zond.db]")
 	fmt.Fprintln(os.Stderr, "  zond token revoke -id <id> [-db zond.db]")

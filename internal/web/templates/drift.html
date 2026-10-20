@@ -1,0 +1,29 @@
+{{template "header" .}}
+<form method="get" action="/drift" class="filter">
+  <select name="source">
+    <option value="">— источник —</option>
+    {{range .Sources}}<option value="{{.}}" {{if eq $.Source .}}selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <button type="submit">Сравнить</button>
+</form>
+{{if .Source}}
+  {{if not .OK}}<p>Недостаточно завершённых прогонов источника (нужно два, п. 11.3).</p>{{end}}
+  {{if .Report}}
+  <p>База: {{.Report.BaseScanID}} → текущий: {{.Report.CurrScanID}}</p>
+  <h2>Появились ({{len .Report.Added}})</h2>
+  <table>{{range .Report.Added}}<tr><td>{{.Table}}</td><td>{{.Path}}</td><td><span class="badge l-{{.Label}}">{{.Label}}</span></td></tr>{{end}}</table>
+  <h2>Исчезли ({{len .Report.Removed}})</h2>
+  <table>{{range .Report.Removed}}<tr><td>{{.Table}}</td><td>{{.Path}}</td><td><span class="badge l-{{.Label}}">{{.Label}}</span></td></tr>{{end}}</table>
+  <h2>Сменили вердикт ({{len .Report.Changed}})</h2>
+  <table>
+    <tr><th>Таблица</th><th>Путь</th><th>Было</th><th>Стало</th><th>Δconf</th></tr>
+    {{range .Report.Changed}}
+    <tr><td>{{.Table}}</td><td>{{.Path}}</td>
+      <td><span class="badge l-{{.FromLabel}}">{{.FromLabel}}</span> ({{conf .FromConfidence}})</td>
+      <td><span class="badge l-{{.ToLabel}}">{{.ToLabel}}</span> ({{conf .ToConfidence}})</td>
+      <td>{{conf .ToConfidence}} vs {{conf .FromConfidence}}</td></tr>
+    {{end}}
+  </table>
+  {{end}}
+{{end}}
+{{template "footer" .}}

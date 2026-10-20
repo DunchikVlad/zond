@@ -1,0 +1,47 @@
+{{template "header" .}}
+<form method="get" action="/verdicts" class="filter" hx-get="/verdicts" hx-target="#vtable" hx-push-url="true">
+  <input name="scan_id" placeholder="scan_id" value="{{.Filter.ScanID}}">
+  <input name="table" placeholder="таблица" value="{{.Filter.Table}}">
+  <select name="label">
+    <option value="">лейбл: любой</option>
+    {{range .Labels}}<option value="{{.}}" {{if eq $.Filter.Label .}}selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <select name="sensitivity">
+    <option value="">чувствительность</option>
+    <option value="PII" {{if eq .Filter.Sensitivity "PII"}}selected{{end}}>PII</option>
+    <option value="PCI" {{if eq .Filter.Sensitivity "PCI"}}selected{{end}}>PCI</option>
+    <option value="PHI" {{if eq .Filter.Sensitivity "PHI"}}selected{{end}}>PHI</option>
+    <option value="none" {{if eq .Filter.Sensitivity "none"}}selected{{end}}>none</option>
+  </select>
+  <select name="review_status">
+    <option value="">статус ревью</option>
+    <option value="auto_accepted" {{if eq .Filter.ReviewStatus "auto_accepted"}}selected{{end}}>auto_accepted</option>
+    <option value="pending" {{if eq .Filter.ReviewStatus "pending"}}selected{{end}}>pending</option>
+    <option value="confirmed" {{if eq .Filter.ReviewStatus "confirmed"}}selected{{end}}>confirmed</option>
+    <option value="rejected" {{if eq .Filter.ReviewStatus "rejected"}}selected{{end}}>rejected</option>
+    <option value="relabelled" {{if eq .Filter.ReviewStatus "relabelled"}}selected{{end}}>relabelled</option>
+  </select>
+  <input name="min_conf" placeholder="min_conf" size="6" value="{{if .Filter.MinConf}}{{conf .Filter.MinConf}}{{end}}">
+  <input name="cluster_id" placeholder="cluster_id" value="{{.Filter.ClusterID}}">
+  <button type="submit">Фильтр</button>
+  <a href="/verdicts">Сброс</a>
+</form>
+<p>Всего под фильтром: {{.Total}} · страница {{.Page}} из {{.Pages}}</p>
+<div id="vtable">
+<table>
+  <tr><th>Таблица</th><th>Путь</th><th>Лейбл</th><th>Чувствит.</th><th>Conf</th><th>Слой</th><th>Статус ревью</th></tr>
+  {{range .Verdicts}}
+  <tr>
+    <td>{{.Table}}</td><td>{{.Path}}</td>
+    <td><span class="badge l-{{.Label}}">{{.Label}}</span>{{if .FinalLabel}} → <span class="badge l-{{.FinalLabel}}">{{.FinalLabel}}</span>{{end}}</td>
+    <td>{{.Sensitivity}}</td><td>{{conf .Confidence}}</td>
+    <td><span class="badge layer-{{.EvidenceLayer}}">{{.EvidenceLayer}}</span></td>
+    <td>{{.ReviewStatus}}
+      {{if eq .ReviewStatus "pending"}} <a href="/review">→ ревью</a>{{end}}
+    </td>
+  </tr>
+  {{end}}
+</table>
+{{if gt .Pages 1}}<p class="pages">{{if gt .Page 1}}<a href="?page={{sub .Page 1}}">← назад</a>{{end}} стр. {{.Page}} из {{.Pages}} {{if lt .Page .Pages}}<a href="?page={{add .Page 1}}">вперёд →</a>{{end}}</p>{{end}}
+</div>
+{{template "footer" .}}

@@ -1,0 +1,19 @@
+{{template "header" .}}
+<form method="get" action="/cost" class="filter">
+  <select name="scan_id">
+    {{range .Scans}}<option value="{{.ID}}" {{if eq $.ScanID .ID}}selected{{end}}>{{.ID}} ({{.SourceName}}, {{fmtTime .StartedAt}})</option>{{end}}
+  </select>
+  <button type="submit">Показать</button>
+</form>
+{{if .Stats}}
+<h2>Прогон {{.Stats.ScanID}}</h2>
+<p>Вызовов LLM: {{.Stats.Calls}} (из кэша: {{.Stats.CacheHits}}) · Токены in/out: {{.Stats.TokensIn}}/{{.Stats.TokensOut}} · Стоимость: {{usd .Stats.CostUSD}}</p>
+<p>Решено без LLM: <strong>{{pct .Stats.NoLLMShare}}</strong> (цель ≥70%, п. 17)</p>
+<table>
+  <tr><th>Агент</th><th>Модель</th><th>Вызовов</th><th>Кэш</th><th>Ошибок</th><th>Токены in/out</th><th>$</th><th>Ср. latency, мс</th></tr>
+  {{range .Stats.ByAgent}}
+  <tr><td>{{.AgentID}}</td><td>{{.Model}}</td><td>{{.Calls}}</td><td>{{.CacheHits}}</td><td>{{.Errors}}</td><td>{{.TokensIn}}/{{.TokensOut}}</td><td>{{usd .CostUSD}}</td><td>{{conf .LatencyAvg}}</td></tr>
+  {{end}}
+</table>
+{{else}}<p>Нет данных — выполните скан с LLM-слоем.</p>{{end}}
+{{template "footer" .}}

@@ -124,6 +124,11 @@ type Source struct {
 	Type string `yaml:"type"` // clickhouse | mongodb | <db> по конвенции путей
 	DSN  string `yaml:"dsn"`  // либо DSN, либо URI — ровно один источник адреса
 	URI  string `yaml:"uri"`
+	// Schedule — cron-выражение периодического перескана (blueprint п. 15:
+	// расписание в конфиге источника). Пусто — только ручной запуск.
+	// Валидация выражения — задача шедулера (при ошибке: warn-лог + аудит,
+	// источник пропускается, старт serve не роняется).
+	Schedule string `yaml:"schedule"`
 }
 
 // SSO — параметры SAML 2.0 Service Provider (ADR-0011). Только публичные поля.

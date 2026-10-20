@@ -1,0 +1,31 @@
+{{template "header" .}}
+{{if .Runner}}
+<form method="post" action="/scans/start" class="startform">
+  <select name="source">
+    {{range .Sources}}<option value="{{.}}">{{.}}</option>{{end}}
+  </select>
+  <select name="profile">
+    <option value="quick">quick</option>
+    <option value="deep" selected>deep</option>
+    <option value="custom">custom</option>
+  </select>
+  <button type="submit">Запустить скан</button>
+</form>
+{{end}}
+<p>Всего прогонов: {{.Total}}</p>
+<table>
+  <tr><th>Прогон</th><th>Источник</th><th>Профиль</th><th>Статус</th><th>Прогресс</th><th>Старт</th><th>Финиш</th><th></th></tr>
+  {{range .Scans}}
+  <tr>
+    <td><a href="/scans/{{.ID}}">{{.ID}}</a></td>
+    <td>{{.SourceName}}</td>
+    <td>{{.Profile}}</td>
+    <td><span class="badge s-{{.Status}}">{{.Status}}</span></td>
+    <td>{{.Progress}}</td>
+    <td>{{fmtTime .StartedAt}}</td>
+    <td>{{fmtTimeP .FinishedAt}}</td>
+    <td>{{if eq .Status "running"}}<button hx-post="/scans/{{.ID}}/stop" hx-confirm="Остановить прогон?" class="danger">Стоп</button>{{end}}</td>
+  </tr>
+  {{end}}
+</table>
+{{template "footer" .}}

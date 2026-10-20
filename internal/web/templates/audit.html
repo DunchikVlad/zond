@@ -1,0 +1,24 @@
+{{template "header" .}}
+<form method="get" action="/audit" class="filter">
+  <input name="actor" placeholder="actor" value="{{.Filter.Actor}}">
+  <input name="category" placeholder="категория" value="{{.Filter.Category}}">
+  <input name="scan" placeholder="scan_id" value="{{.Filter.ScanID}}">
+  <input name="since" placeholder="с даты (YYYY-MM-DD)" value="{{.Since}}">
+  <button type="submit">Фильтр</button>
+</form>
+{{if .Verify}}
+  {{if .Verify.OK}}<p class="ok">Целостность hash-chain: OK (проверено записей: {{.Verify.Checked}})</p>
+  {{else}}<p class="error">⚠ Разрыв цепочки на seq={{.Verify.BrokenAt}}: {{.Verify.Reason}} (runbook: audit-hash-chain-broken)</p>{{end}}
+{{end}}
+<p>Записей (лимит 500): {{len .Entries}}</p>
+<table>
+  <tr><th>seq</th><th>ts</th><th>actor</th><th>категория</th><th>action</th><th>target</th><th>details</th></tr>
+  {{range .Entries}}
+  <tr>
+    <td>{{.Seq}}</td><td>{{fmtTime .TS}}</td><td>{{.Actor}}</td><td>{{.Category}}</td>
+    <td>{{.Action}}</td><td>{{.Target}}</td>
+    <td class="details">{{range $k, $v := .Details}}{{$k}}={{$v}} {{end}}</td>
+  </tr>
+  {{end}}
+</table>
+{{template "footer" .}}

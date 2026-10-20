@@ -1,0 +1,26 @@
+{{template "header" .}}
+<h2>Источники</h2>
+<table>
+  <tr><th>Имя</th><th>Тип</th></tr>
+  {{range .Sources}}<tr><td>{{.Name}}</td><td>{{.Type}}</td></tr>{{end}}
+</table>
+<p class="note">DSN/URI не отображаются (секреты интерполированы в памяти, п. 14.1). Расписание пересканов — поле schedule у источника (п. 15).</p>
+
+<h2>Агенты LLM</h2>
+<table>
+  <tr><th>id</th><th>model</th><th>endpoint</th><th>max_values</th><th>timeout_s</th><th>retries</th><th>band</th><th>escalate_to</th></tr>
+  {{range .Agents}}
+  <tr><td>{{.ID}}</td><td>{{.Model}}</td><td>{{.Endpoint}}</td><td>{{.MaxValuesPerCall}}</td><td>{{.TimeoutS}}</td><td>{{.MaxRetries}}</td><td>[{{conf (index .ConfidenceBand 0)}}; {{conf (index .ConfidenceBand 1)}}]</td><td>{{.EscalateTo}}</td></tr>
+  {{end}}
+</table>
+
+<h2>Пороги ансамбля</h2>
+<p>tau_accept={{.Ensemble.TauAccept}} · tau_review={{.Ensemble.TauReview}} · веса: {{range $k, $v := .Ensemble.Weights}}{{$k}}={{$v}} {{end}}</p>
+
+<h2>Таксономия (v{{.Taxonomy.Version}})</h2>
+<table>
+  <tr><th>Лейбл</th><th>Чувствительность</th></tr>
+  {{range .Taxonomy.Labels}}<tr><td><span class="badge l-{{.Name}}">{{.Name}}</span></td><td>{{.Sensitivity}}</td></tr>{{end}}
+</table>
+<p class="note">Редактирование — hot-reload detectors.yaml (ADR-0014), реализация позже; connections.yaml и sso: требуют рестарта.</p>
+{{template "footer" .}}

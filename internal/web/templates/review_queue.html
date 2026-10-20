@@ -1,0 +1,30 @@
+{{if .Msg}}<p class="msg">{{.Msg}}</p>{{end}}
+{{if not .Queue}}<p>Очередь пуста — всё разобрано.</p>{{end}}
+<form id="bulk">
+{{range .Queue}}
+<div class="card">
+  <div class="card-head">
+    <input type="checkbox" name="ids" value="{{.V.ID}}">
+    <strong>{{.V.Table}} / {{.V.Path}}</strong>
+    <span class="badge l-{{.V.Label}}">{{.V.Label}}</span>
+    <span class="badge layer-{{.V.EvidenceLayer}}">{{.V.EvidenceLayer}}</span>
+    conf {{conf .V.Confidence}} · {{.V.Sensitivity}} · сэмпл {{.V.SampleSize}}
+  </div>
+  {{range .EvidenceLines}}<div class="ev">{{.}}</div>{{end}}
+  <div class="card-actions">
+    <button hx-post="/review/{{.V.ID}}/action" hx-vals='{"action":"confirm"}' hx-target="#queue">Подтвердить</button>
+    <button hx-post="/review/{{.V.ID}}/action" hx-vals='{"action":"reject"}' hx-target="#queue" class="danger">Отклонить</button>
+    <select name="label">
+      {{range $.Labels}}<option value="{{.}}">{{.}}</option>{{end}}
+    </select>
+    <button hx-post="/review/{{.V.ID}}/action" hx-vals='{"action":"relabel"}' hx-include="closest .card" hx-target="#queue">Пере-классифицировать</button>
+  </div>
+</div>
+{{end}}
+{{if .Queue}}
+<div class="bulkbar">
+  <button hx-post="/review/bulk" hx-vals='{"action":"confirm"}' hx-include="#bulk" hx-target="#queue">Подтвердить выбранные</button>
+  <button hx-post="/review/bulk" hx-vals='{"action":"reject"}' hx-include="#bulk" hx-target="#queue" class="danger">Отклонить выбранные</button>
+</div>
+{{end}}
+</form>

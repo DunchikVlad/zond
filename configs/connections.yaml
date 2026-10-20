@@ -9,6 +9,7 @@ sources:
   - name: ch-test
     type: clickhouse
     dsn: "clickhouse://test:${CH_TEST_PASSWORD}@192.168.31.119:9000/default"
+    # schedule: "0 2 * * *" # периодический перескан источника (blueprint п. 15, cron; пусто — только ручной запуск)
   - name: mongo-test
     type: mongodb
     uri: "mongodb://test:${MONGO_TEST_PASSWORD}@192.168.31.119:27017/testdb"

@@ -1,0 +1,34 @@
+{{template "header" .}}
+<p>
+  Источник: <strong>{{.Scan.SourceName}}</strong> · Профиль: {{.Scan.Profile}} ·
+  Статус: <span class="badge s-{{.Scan.Status}}">{{.Scan.Status}}</span> ·
+  Старт: {{fmtTime .Scan.StartedAt}} · Финиш: {{fmtTimeP .Scan.FinishedAt}}
+  {{if eq .Scan.Status "running"}} · <button hx-post="/scans/{{.Scan.ID}}/stop" class="danger">Остановить</button>{{end}}
+</p>
+
+<h2>Таблицы (чекпоинты п. 13)</h2>
+<table>
+  <tr><th>Таблица</th><th>Строк</th><th>Статус</th><th>Ошибка</th></tr>
+  {{range .Tables}}
+  <tr><td>{{.Table}}</td><td>{{.RowCount}}</td><td><span class="badge s-{{.Status}}">{{.Status}}</span></td><td class="err">{{.Error}}</td></tr>
+  {{end}}
+</table>
+{{range .Errors}}<p class="err">⚠ {{.}}</p>{{end}}
+
+<h2>Вердикты</h2>
+<p>Всего: {{.Summary.Total}} · по статусам: {{range $k, $v := .Summary.ByStatus}}{{$k}}={{$v}} {{end}}</p>
+<p>По слоям: {{range $k, $v := .Summary.ByLayer}}{{$k}}={{$v}} {{end}}</p>
+<p><a href="/verdicts?scan_id={{.Scan.ID}}">Открыть вердикты прогона →</a></p>
+
+<h2>Экономика LLM</h2>
+{{if .Cost}}
+<p>Вызовов: {{.Cost.Calls}} (кэш {{.Cost.CacheHits}}) · Токены: {{.Cost.TokensIn}}/{{.Cost.TokensOut}} · Стоимость: {{usd .Cost.CostUSD}}</p>
+<p>Решено без LLM: {{pct .Cost.NoLLMShare}} (цель ≥70%, п. 17)</p>
+<table>
+  <tr><th>Агент</th><th>Модель</th><th>Вызовов</th><th>Ошибок</th><th>Токены in/out</th><th>$</th><th>Ср. latency, мс</th></tr>
+  {{range .Cost.ByAgent}}
+  <tr><td>{{.AgentID}}</td><td>{{.Model}}</td><td>{{.Calls}}</td><td>{{.Errors}}</td><td>{{.TokensIn}}/{{.TokensOut}}</td><td>{{usd .CostUSD}}</td><td>{{conf .LatencyAvg}}</td></tr>
+  {{end}}
+</table>
+{{else}}<p>Нет вызовов LLM в этом прогоне.</p>{{end}}
+{{template "footer" .}}

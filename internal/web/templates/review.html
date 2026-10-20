@@ -1,0 +1,6 @@
+{{template "header" .}}
+<p>Очередь ручного ревью (pending, риск первыми — п. 11.3). Всего: {{.Total}}</p>
+<div id="queue">
+{{template "review_queue.html" .}}
+</div>
+{{template "footer" .}}
