@@ -60,7 +60,7 @@ func New(st *store.Store, log *slog.Logger, sessions *auth.SessionStore, authEna
 		log = slog.New(slog.DiscardHandler)
 	}
 	tmpl, err := template.New("").Funcs(template.FuncMap{
-		"fmtTime":  fmtTime,
+		"fmtTime": fmtTime,
 		"fmtTimeP": func(t *time.Time) string {
 			if t == nil {
 				return "—"
