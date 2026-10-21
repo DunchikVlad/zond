@@ -1,4 +1,22 @@
 {{template "header" .}}
+{{if .Instance}}
+<h2>Инстанс за {{.Instance.Window}} (п. 17)</h2>
+<p>Вызовов LLM: {{.Instance.LLM.Calls}} (из кэша: {{.Instance.LLM.CacheHits}}, {{pct .Instance.LLM.CacheHitShare}}; ошибок: {{.Instance.LLM.Errors}})
+  · Токены in/out: {{.Instance.LLM.TokensIn}}/{{.Instance.LLM.TokensOut}} · Стоимость: {{usd .Instance.LLM.CostUSD}}</p>
+<p>Latency p50/p95: {{.Instance.LLM.LatencyP50Ms}}/{{.Instance.LLM.LatencyP95Ms}} мс
+  {{if .Instance.LLM.Unavailable}}· <strong class="alert">LLM недоступен (серия ошибок {{.Instance.LLM.UnavailableStreak}})</strong>{{end}}</p>
+{{if .Instance.Sources}}
+<table>
+  <tr><th>Источник</th><th>Последний прогон</th><th>Статус</th><th>Колонок</th><th>Без LLM</th><th>В очереди ревью</th></tr>
+  {{range .Instance.Sources}}
+  <tr><td>{{.Source}}</td><td>{{.ScanID}}</td><td>{{.Status}}</td><td>{{.Columns}}</td><td>{{pct .NoLLMShare}}</td><td>{{.Pending}}</td></tr>
+  {{end}}
+</table>
+{{end}}
+{{if .Instance.Review.ReviewedTotal}}
+<p>Ревью за окно: {{.Instance.Review.ReviewedTotal}} действий (confirm {{.Instance.Review.Actions.confirm}}, reject {{.Instance.Review.Actions.reject}}, relabel {{.Instance.Review.Actions.relabel}}) · доля confirmed: <strong>{{pct .Instance.Review.ConfirmedShare}}</strong></p>
+{{end}}
+{{end}}
 <form method="get" action="/cost" class="filter">
   <select name="scan_id">
     {{range .Scans}}<option value="{{.ID}}" {{if eq $.ScanID .ID}}selected{{end}}>{{.ID}} ({{.SourceName}}, {{fmtTime .StartedAt}})</option>{{end}}

@@ -23,6 +23,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/audit"
 	"github.com/DunchikVlad/zond/internal/auth"
 	"github.com/DunchikVlad/zond/internal/config"
+	"github.com/DunchikVlad/zond/internal/observe"
 	"github.com/DunchikVlad/zond/internal/verdict"
 	"github.com/DunchikVlad/zond/internal/verdict/drift"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
@@ -484,9 +485,11 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 	if scanID != "" {
 		stats, _ = s.st.ScanCostStats(ctx, scanID)
 	}
+	// Инстанс-wide блок (п. 17): экономика/латентность/ревью за окно.
+	instance, _ := observe.BuildSnapshot(ctx, s.st, observe.Default, observe.DefaultWindow)
 	s.render(w, http.StatusOK, "cost.html", map[string]any{
 		"Subject": s.subject(r), "Title": "Экономика", "Scans": scans,
-		"ScanID": scanID, "Stats": stats,
+		"ScanID": scanID, "Stats": stats, "Instance": instance,
 	})
 }
 

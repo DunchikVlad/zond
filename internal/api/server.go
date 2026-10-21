@@ -122,6 +122,7 @@ func (s *Server) routes() {
 
 	mux.HandleFunc("GET /api/v1/drift", s.requireAction(auth.ActionView, s.handleDrift))
 	mux.HandleFunc("GET /api/v1/stats/cost", s.requireAction(auth.ActionView, s.handleCost))
+	mux.HandleFunc("GET /api/v1/stats/metrics", s.requireAction(auth.ActionView, s.handleMetrics))
 	mux.HandleFunc("GET /api/v1/export", s.requireAction(auth.ActionExport, s.handleExport))
 	// Метрики процесса (п. 17): expvar-реестр (zond/process + stdlib
 	// cmdline/memstats) — за ActionView, как просмотр стоимости.

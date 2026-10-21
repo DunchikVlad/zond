@@ -426,3 +426,25 @@ func TestAuditChainIntactAfterAPI(t *testing.T) {
 		t.Fatalf("цепочка: %+v err=%v", rep, err)
 	}
 }
+
+// TestStatsMetrics — GET /api/v1/stats/metrics (п. 17): снимок метрик
+// инстанса (process + llm + sources + review).
+func TestStatsMetrics(t *testing.T) {
+	srv, st := newTestServer(t)
+	mustScan(t, st, "s1", "ch", "done")
+	mustVerdict(t, st, "v1", "s1", "EMAIL", verdict.SensitivityPII, 0.9)
+
+	rec := do(t, srv, "GET", "/api/v1/stats/metrics", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics: %d: %s", rec.Code, rec.Body.String())
+	}
+	m := decode(t, rec)
+	for _, key := range []string{"process", "llm", "sources", "review", "generated_at", "window"} {
+		if _, ok := m[key]; !ok {
+			t.Errorf("снимок без поля %q: %v", key, m)
+		}
+	}
+	if _, ok := m["process"].(map[string]any)["scans_by_status"]; !ok {
+		t.Errorf("process без scans_by_status: %v", m["process"])
+	}
+}

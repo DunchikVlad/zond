@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"expvar"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -29,6 +30,7 @@ import (
 	_ "github.com/DunchikVlad/zond/internal/connector/clickhouse" // регистрация по конвенции путей
 	_ "github.com/DunchikVlad/zond/internal/connector/mongodb"    // регистрация по конвенции путей
 	"github.com/DunchikVlad/zond/internal/logging"
+	"github.com/DunchikVlad/zond/internal/observe"
 	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/scheduler"
 	"github.com/DunchikVlad/zond/internal/verdict"
@@ -531,6 +533,16 @@ func runServe(args []string) int {
 	root.Handle("/api/", srv.Handler())
 	root.Handle("/saml/", srv.Handler())
 	root.Handle("/", webSrv.Handler())
+
+	// Метрики инстанса в expvar (п. 17): zond/store — агрегаты за окно из
+	// store, считаются на скрапе /debug/vars (дешёвые запросы SQLite).
+	expvar.Publish("zond/store", expvar.Func(func() any {
+		snap, err := observe.BuildSnapshot(context.Background(), st, observe.Default, observe.DefaultWindow)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		return snap
+	}))
 
 	// Планировщик (инкремент 5г, п. 15/15.4): TTL-прочистка кэша, retention
 	// сканов (90 дней), расписания пересканов источников (schedule).

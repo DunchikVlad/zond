@@ -1,12 +1,15 @@
-// Обработчики дрейфа и экономики (blueprint п. 11.2): GET /api/v1/drift —
-// дифф двух последних прогонов источника; GET /api/v1/stats/cost —
-// токены/стоимость по агентам и моделям (п. 17).
+// Обработчики дрейфа, экономики и метрик (blueprint п. 11.2): GET
+// /api/v1/drift — дифф двух последних прогонов источника; GET
+// /api/v1/stats/cost — токены/стоимость по агентам и моделям (п. 17);
+// GET /api/v1/stats/metrics — снимок бизнес/технических метрик инстанса
+// (процесс + окно из store, п. 17).
 package api
 
 import (
 	"net/http"
 	"time"
 
+	"github.com/DunchikVlad/zond/internal/observe"
 	"github.com/DunchikVlad/zond/internal/verdict/drift"
 )
 
@@ -64,4 +67,15 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleMetrics — GET /api/v1/stats/metrics (п. 17): снимок метрик инстанса
+// (процессные счётчики + агрегаты за 24ч из store + сводка по источникам).
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	snap, err := observe.BuildSnapshot(r.Context(), s.st, observe.Default, observe.DefaultWindow)
+	if err != nil {
+		s.internalError(w, r, "метрики", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
