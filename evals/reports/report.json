@@ -1,0 +1,392 @@
+{
+  "schema": "1.0.0",
+  "dataset": {
+    "dir": "evals/dataset",
+    "dataset": "1.0.0",
+    "taxonomy": "1.0.0",
+    "seed": 20261021,
+    "total": 1000,
+    "counts": {
+      "by_label": {
+        "ADDRESS": 37,
+        "BANK_ACCOUNT": 37,
+        "BOOLEAN": 36,
+        "CARD_NUMBER": 37,
+        "DATE_OF_BIRTH": 37,
+        "DATE_TIME": 45,
+        "EMAIL": 45,
+        "FREE_TEXT": 117,
+        "GEO_LOCATION": 37,
+        "IDENTIFIER": 37,
+        "IP_ADDRESS": 37,
+        "JSON_DOC": 36,
+        "NUMERIC_MEASURE": 45,
+        "PASSPORT_ID": 37,
+        "PERSON_NAME": 45,
+        "PHONE": 45,
+        "SNILS": 37,
+        "TAX_ID": 37,
+        "UNKNOWN": 216
+      },
+      "by_kind": {
+        "free_text": 80,
+        "mixed": 60,
+        "polymorphic": 50,
+        "positive": 700,
+        "spoof": 110
+      }
+    }
+  },
+  "config": {
+    "tau_accept": 0.8,
+    "tau_review": 0.5,
+    "weights": {
+      "llm": 1.2,
+      "meta": 1,
+      "rules": 1.5
+    },
+    "band": [
+      0.5,
+      0.8
+    ],
+    "llm": false,
+    "prices": {
+      "in": 0,
+      "out": 0
+    }
+  },
+  "columns": 1000,
+  "labels": {
+    "ADDRESS": {
+      "support": 37,
+      "predicted": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 37,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0
+    },
+    "BANK_ACCOUNT": {
+      "support": 37,
+      "predicted": 37,
+      "tp": 37,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1
+    },
+    "BOOLEAN": {
+      "support": 36,
+      "predicted": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 36,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0
+    },
+    "CARD_NUMBER": {
+      "support": 37,
+      "predicted": 67,
+      "tp": 37,
+      "fp": 30,
+      "fn": 0,
+      "precision": 0.5522,
+      "recall": 1,
+      "f1": 0.7115
+    },
+    "DATE_OF_BIRTH": {
+      "support": 37,
+      "predicted": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 37,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0
+    },
+    "DATE_TIME": {
+      "support": 45,
+      "predicted": 113,
+      "tp": 45,
+      "fp": 68,
+      "fn": 0,
+      "precision": 0.3982,
+      "recall": 1,
+      "f1": 0.5696
+    },
+    "EMAIL": {
+      "support": 45,
+      "predicted": 44,
+      "tp": 43,
+      "fp": 1,
+      "fn": 2,
+      "precision": 0.9773,
+      "recall": 0.9556,
+      "f1": 0.9663
+    },
+    "FREE_TEXT": {
+      "support": 117,
+      "predicted": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 117,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0
+    },
+    "GEO_LOCATION": {
+      "support": 37,
+      "predicted": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 37,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0
+    },
+    "IDENTIFIER": {
+      "support": 37,
+      "predicted": 37,
+      "tp": 37,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1
+    },
+    "IP_ADDRESS": {
+      "support": 37,
+      "predicted": 37,
+      "tp": 37,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1
+    },
+    "JSON_DOC": {
+      "support": 36,
+      "predicted": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 36,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0
+    },
+    "NUMERIC_MEASURE": {
+      "support": 45,
+      "predicted": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 45,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0
+    },
+    "PASSPORT_ID": {
+      "support": 37,
+      "predicted": 37,
+      "tp": 16,
+      "fp": 21,
+      "fn": 21,
+      "precision": 0.4324,
+      "recall": 0.4324,
+      "f1": 0.4324
+    },
+    "PERSON_NAME": {
+      "support": 45,
+      "predicted": 23,
+      "tp": 23,
+      "fp": 0,
+      "fn": 22,
+      "precision": 1,
+      "recall": 0.5111,
+      "f1": 0.6765
+    },
+    "PHONE": {
+      "support": 45,
+      "predicted": 39,
+      "tp": 34,
+      "fp": 5,
+      "fn": 11,
+      "precision": 0.8718,
+      "recall": 0.7556,
+      "f1": 0.8096
+    },
+    "SNILS": {
+      "support": 37,
+      "predicted": 63,
+      "tp": 37,
+      "fp": 26,
+      "fn": 0,
+      "precision": 0.5873,
+      "recall": 1,
+      "f1": 0.74
+    },
+    "TAX_ID": {
+      "support": 37,
+      "predicted": 77,
+      "tp": 37,
+      "fp": 40,
+      "fn": 0,
+      "precision": 0.4805,
+      "recall": 1,
+      "f1": 0.6491
+    },
+    "UNKNOWN": {
+      "support": 216,
+      "predicted": 426,
+      "tp": 106,
+      "fp": 320,
+      "fn": 110,
+      "precision": 0.2488,
+      "recall": 0.4907,
+      "f1": 0.3302
+    }
+  },
+  "micro": {
+    "precision": 0.489,
+    "recall": 0.489,
+    "f1": 0.489
+  },
+  "macro_f1": 0.4676,
+  "by_kind": {
+    "free_text": {
+      "total": 80,
+      "correct": 0,
+      "accuracy": 0
+    },
+    "mixed": {
+      "total": 60,
+      "correct": 20,
+      "accuracy": 0.3333
+    },
+    "polymorphic": {
+      "total": 50,
+      "correct": 50,
+      "accuracy": 1
+    },
+    "positive": {
+      "total": 700,
+      "correct": 399,
+      "accuracy": 0.57
+    },
+    "spoof": {
+      "total": 110,
+      "correct": 20,
+      "accuracy": 0.1818
+    }
+  },
+  "spoofs": {
+    "BANK_ACCOUNT": {
+      "total": 20,
+      "mispredicted_as_label": 0,
+      "spoof_precision": 1
+    },
+    "CARD_NUMBER": {
+      "total": 30,
+      "mispredicted_as_label": 30,
+      "spoof_precision": 0
+    },
+    "SNILS": {
+      "total": 30,
+      "mispredicted_as_label": 25,
+      "spoof_precision": 0.1667
+    },
+    "TAX_ID": {
+      "total": 30,
+      "mispredicted_as_label": 9,
+      "spoof_precision": 0.7
+    }
+  },
+  "review_status": {
+    "auto_accepted": 461,
+    "pending": 539
+  },
+  "sweep": [
+    {
+      "tau_accept": 0.5,
+      "auto_accepted": 490,
+      "pending": 510,
+      "f1_all": 0.489,
+      "f1_decided": 0.7633,
+      "macro_f1": 0.4676
+    },
+    {
+      "tau_accept": 0.55,
+      "auto_accepted": 474,
+      "pending": 526,
+      "f1_all": 0.489,
+      "f1_decided": 0.789,
+      "macro_f1": 0.4676
+    },
+    {
+      "tau_accept": 0.6000000000000001,
+      "auto_accepted": 474,
+      "pending": 526,
+      "f1_all": 0.489,
+      "f1_decided": 0.789,
+      "macro_f1": 0.4676
+    },
+    {
+      "tau_accept": 0.6500000000000001,
+      "auto_accepted": 474,
+      "pending": 526,
+      "f1_all": 0.489,
+      "f1_decided": 0.789,
+      "macro_f1": 0.4676
+    },
+    {
+      "tau_accept": 0.7000000000000002,
+      "auto_accepted": 462,
+      "pending": 538,
+      "f1_all": 0.489,
+      "f1_decided": 0.7857,
+      "macro_f1": 0.4676
+    },
+    {
+      "tau_accept": 0.7500000000000002,
+      "auto_accepted": 462,
+      "pending": 538,
+      "f1_all": 0.489,
+      "f1_decided": 0.7857,
+      "macro_f1": 0.4676
+    },
+    {
+      "tau_accept": 0.8000000000000003,
+      "auto_accepted": 461,
+      "pending": 539,
+      "f1_all": 0.489,
+      "f1_decided": 0.7852,
+      "macro_f1": 0.4676
+    },
+    {
+      "tau_accept": 0.8500000000000003,
+      "auto_accepted": 408,
+      "pending": 592,
+      "f1_all": 0.489,
+      "f1_decided": 0.8309,
+      "macro_f1": 0.4676
+    },
+    {
+      "tau_accept": 0.9000000000000004,
+      "auto_accepted": 180,
+      "pending": 820,
+      "f1_all": 0.489,
+      "f1_decided": 0.8222,
+      "macro_f1": 0.4676
+    },
+    {
+      "tau_accept": 0.9500000000000004,
+      "auto_accepted": 180,
+      "pending": 820,
+      "f1_all": 0.489,
+      "f1_decided": 0.8222,
+      "macro_f1": 0.4676
+    }
+  ]
+}

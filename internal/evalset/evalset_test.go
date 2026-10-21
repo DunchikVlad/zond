@@ -393,3 +393,55 @@ func TestColumnOrderStable(t *testing.T) {
 		last = k
 	}
 }
+
+// TestReadWriteRoundTrip — Write → Read возвращает манифест и колонки
+// без потерь (формат датасета — контракт harness'а, п. 16.6).
+func TestReadWriteRoundTrip(t *testing.T) {
+	cfg := testConfig(t)
+	m, cols, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	dir := t.TempDir()
+	if err := Write(dir, m, cols); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	m2, cols2, err := Read(dir)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if m2.Dataset != m.Dataset || m2.Seed != m.Seed || m2.Total != m.Total || m2.Taxonomy != m.Taxonomy {
+		t.Errorf("манифест разошёлся: %+v ≠ %+v", m2, m)
+	}
+	if len(cols2) != len(cols) {
+		t.Fatalf("колонок %d ≠ %d", len(cols2), len(cols))
+	}
+	for i := range cols {
+		if cols2[i].ID != cols[i].ID || cols2[i].Label != cols[i].Label || cols2[i].Kind != cols[i].Kind ||
+			cols2[i].Spoofs != cols[i].Spoofs || len(cols2[i].Values) != len(cols[i].Values) {
+			t.Errorf("колонка %d разошлась: %+v ≠ %+v", i, cols2[i], cols[i])
+		}
+	}
+}
+
+// TestReadErrors — отсутствующие/битые файлы дают понятные ошибки.
+func TestReadErrors(t *testing.T) {
+	if _, _, err := Read(t.TempDir()); err == nil {
+		t.Error("Read пустого каталога: ожидалась ошибка")
+	}
+	dir := t.TempDir()
+	cfg := testConfig(t)
+	m, cols, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if err := Write(dir, m, cols); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "columns.jsonl"), []byte("{\"id\":\"x\"}\n{broken\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Read(dir); err == nil {
+		t.Error("Read с битым columns.jsonl: ожидалась ошибка")
+	}
+}

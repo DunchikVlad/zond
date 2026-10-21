@@ -9,10 +9,12 @@
 package evalset
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -342,6 +344,38 @@ func Write(dir string, m *Manifest, cols []Column) error {
 		return fmt.Errorf("evalset: columns.jsonl: %w", err)
 	}
 	return nil
+}
+
+// Read загружает датасет из каталога dir (manifest.json + columns.jsonl,
+// записанные Write). columns.jsonl читается потоково — вся выдача в памяти
+// только один раз (harness п. 16.6 держит колонки для sweep).
+func Read(dir string) (*Manifest, []Column, error) {
+	md, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("evalset: манифест %s: %w", dir, err)
+	}
+	var m Manifest
+	if err := json.Unmarshal(md, &m); err != nil {
+		return nil, nil, fmt.Errorf("evalset: manifest.json: %w", err)
+	}
+	f, err := os.Open(filepath.Join(dir, "columns.jsonl"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("evalset: %w", err)
+	}
+	defer f.Close()
+	var cols []Column
+	dec := json.NewDecoder(bufio.NewReader(f))
+	for {
+		var c Column
+		if err := dec.Decode(&c); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, nil, fmt.Errorf("evalset: columns.jsonl: %w", err)
+		}
+		cols = append(cols, c)
+	}
+	return &m, cols, nil
 }
 
 // SortByKind — ключи ByKind в лексикографическом порядке (стабильный вывод CLI).

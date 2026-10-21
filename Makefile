@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 LDFLAGS := -X main.Version=$(VERSION) -X main.Commit=$(COMMIT)
 
-.PHONY: build test test-race vet fmt lint cover config-check ci clean
+.PHONY: build test test-race vet fmt lint cover config-check ci eval clean
 
 build: ## Сборка bin/zond с версией из git
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/zond
@@ -31,6 +31,12 @@ config-check: build
 	set -a && . ./configs/ci.env && set +a && ./bin/$(BINARY) config validate
 
 ci: fmt vet build test ## Локальный прогон CI-ворот
+
+# Отчёт F1/$ по эталонному датасету (слоёв 0+1, детерминировано; датасет
+# закоммичен, регенерация — `go run ./cmd/eval generate`, меняет manifest).
+# LLM-слой: go run ./cmd/eval run -llm (см. usage подкоманды).
+eval: ## Отчёт F1 и $/1000 колонок по датасету (evals/reports/report.json)
+	go run ./cmd/eval run
 
 clean:
 	rm -rf bin coverage.out coverage.html
