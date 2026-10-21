@@ -326,7 +326,8 @@ serve (1 процесс)
 | `internal/logging` | JSON-лог, correlation id, redact | Logger, Redactor |
 | `internal/observe` | agent_calls-учёт, expvar, OTel | Meter, Tracer |
 | `internal/scheduler` | cron, окна, TTL-jobs | Scheduler |
-| `evals/`, `cmd/seed` | датасет, отчёты, демо-данные | Generator |
+| `internal/evalset` | генератор эталонного eval-датасета (п. 16.6, S6а) | Generator, Column, Manifest |
+| `evals/`, `cmd/eval`, `cmd/seed` | датасет, отчёты, демо-данные | Generator |
 
 ---
 
