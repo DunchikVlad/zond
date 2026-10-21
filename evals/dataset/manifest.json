@@ -1,0 +1,38 @@
+{
+  "dataset": "1.0.0",
+  "seed": 20261021,
+  "rows": 20,
+  "total": 1000,
+  "taxonomy": "1.0.0",
+  "generated": "2026-10-21T07:10:21Z",
+  "counts": {
+    "by_label": {
+      "ADDRESS": 37,
+      "BANK_ACCOUNT": 37,
+      "BOOLEAN": 36,
+      "CARD_NUMBER": 37,
+      "DATE_OF_BIRTH": 37,
+      "DATE_TIME": 45,
+      "EMAIL": 45,
+      "FREE_TEXT": 117,
+      "GEO_LOCATION": 37,
+      "IDENTIFIER": 37,
+      "IP_ADDRESS": 37,
+      "JSON_DOC": 36,
+      "NUMERIC_MEASURE": 45,
+      "PASSPORT_ID": 37,
+      "PERSON_NAME": 45,
+      "PHONE": 45,
+      "SNILS": 37,
+      "TAX_ID": 37,
+      "UNKNOWN": 216
+    },
+    "by_kind": {
+      "free_text": 80,
+      "mixed": 60,
+      "polymorphic": 50,
+      "positive": 700,
+      "spoof": 110
+    }
+  }
+}
