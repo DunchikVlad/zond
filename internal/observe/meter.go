@@ -25,7 +25,7 @@ import (
 type Meter struct {
 	scansStarted      atomic.Int64
 	scansFinished     atomic.Int64
-	byStatus          sync.Map // scan status → *atomic.Int64
+	byStatus          sync.Map     // scan status → *atomic.Int64
 	llmCalls          atomic.Int64 // ok-вызовы LLM (не кэш)
 	llmErrors         atomic.Int64 // вызовы LLM со статусом error
 	cacheHits         atomic.Int64 // вердикты из кэша (п. 10.5)
