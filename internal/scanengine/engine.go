@@ -27,6 +27,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/connector"
 	"github.com/DunchikVlad/zond/internal/ensemble"
 	"github.com/DunchikVlad/zond/internal/fingerprint"
+	"github.com/DunchikVlad/zond/internal/observe"
 	"github.com/DunchikVlad/zond/internal/sampler"
 	"github.com/DunchikVlad/zond/internal/verdict"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
@@ -216,6 +217,7 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 	}); err != nil {
 		return nil, fmt.Errorf("создание прогона: %w", err)
 	}
+	observe.Default.IncrScanStarted() // п. 17: счётчик процесса
 	// Аудит старта скана (ADR-0013, п. 14.2): запись обязательна — ошибка
 	// аудита отменяет скан (действие без аудита не считается совершённым).
 	if err := e.st.AppendAudit(ctx, []audit.Event{e.scanEvent(scanID, "scan_start", map[string]any{
@@ -294,6 +296,7 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 func (e *Engine) finish(ctx context.Context, rep *Report, status string) error {
 	rep.Status = status
 	rep.FinishedAt = e.nowFn()
+	observe.Default.IncrScanFinished(status) // п. 17
 	stats, _ := json.Marshal(map[string]any{
 		"tables_total": rep.TablesTotal, "tables_done": rep.TablesDone,
 		"tables_failed": rep.TablesFailed, "verdicts": rep.Verdicts,
@@ -345,6 +348,7 @@ func (e *Engine) aggregate(ctx context.Context, rep *Report) error {
 		return err
 	}
 	rep.Errors = failed
+	observe.Default.AddVerdicts(rep.Verdicts) // п. 17
 	return nil
 }
 
@@ -446,6 +450,7 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 				applyClusterVerdict(&v, pv)
 				propagated = true
 				e.stats.propagated++
+				observe.Default.IncrClusterPropagated() // п. 17
 			} else {
 				e.clusterer.Attach(id)
 			}
@@ -682,6 +687,17 @@ func (e *Engine) recordCall(v *verdict.Verdict, call store.AgentCall) {
 		if e.cfg.CostScanLimitUSD > 0 && e.cost >= e.cfg.CostScanLimitUSD {
 			e.budgetExceeded = true
 		}
+	}
+	// процессные счётчики (п. 17, expvar /debug/vars)
+	switch {
+	case call.Cached:
+		observe.Default.IncrCacheHit()
+	case call.Status == "ok":
+		observe.Default.IncrLLMCall()
+		observe.Default.AddTokens(call.TokensIn, call.TokensOut)
+		observe.Default.AddCostUSD(call.CostUSD)
+	case call.Status == "error":
+		observe.Default.IncrLLMError()
 	}
 }
 
