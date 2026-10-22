@@ -116,6 +116,17 @@ type Connections struct {
 	Version string   `yaml:"version"`
 	Sources []Source `yaml:"sources"`
 	SSO     SSO      `yaml:"sso"`
+	// Backup — расписание резервного копирования Verdict Store (п. 15.2):
+	// cron-выражение и каталог копий вне инстанса. Пусто — только ручной
+	// `zond backup`. Валидация выражения — задача шедулера (прецедент
+	// source.schedule: warn-лог + аудит, старт не падает).
+	Backup Backup `yaml:"backup"`
+}
+
+// Backup — расписание и каталог онлайн-копий (п. 15.2; VACUUM INTO).
+type Backup struct {
+	Schedule string `yaml:"schedule"` // cron; "" — без автокопий
+	Dir      string `yaml:"dir"`      // каталог назначения (обязателен при schedule)
 }
 
 // Source — один источник данных.
@@ -189,6 +200,9 @@ func (c *Connections) Validate() error {
 		default:
 			errs = append(errs, fmt.Errorf("sso: cookie_samesite допустимы lax|none, получено %q", c.SSO.CookieSameSite))
 		}
+	}
+	if c.Backup.Schedule != "" && c.Backup.Dir == "" {
+		errs = append(errs, errors.New("backup: dir обязателен при заданном schedule (п. 15.2)"))
 	}
 	return errors.Join(errs...)
 }

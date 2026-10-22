@@ -229,3 +229,26 @@ labels:
 		t.Fatal("дубль лейбла должен отклоняться")
 	}
 }
+
+// TestConnectionsBackupScheduleRequiresDir — расписание бэкапов без каталога
+// отклоняется (п. 15.2: копии — вне инстанса).
+func TestConnectionsBackupScheduleRequiresDir(t *testing.T) {
+	setValidEnv(t)
+	dir := validDir(t)
+	writeFile(t, dir, "connections.yaml", `
+version: "1"
+sources: []
+backup: {schedule: "0 3 * * *"}
+`)
+	if _, err := LoadConnections(filepath.Join(dir, "connections.yaml")); err == nil {
+		t.Fatal("backup.schedule без backup.dir должен отклоняться")
+	}
+	writeFile(t, dir, "connections.yaml", `
+version: "1"
+sources: []
+backup: {schedule: "0 3 * * *", dir: "/var/backups/zond"}
+`)
+	if _, err := LoadConnections(filepath.Join(dir, "connections.yaml")); err != nil {
+		t.Fatalf("корректный backup отклонён: %v", err)
+	}
+}

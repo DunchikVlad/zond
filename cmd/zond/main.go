@@ -66,6 +66,8 @@ func run(args []string) int {
 		return runAgentCheck(args[1:])
 	case "doctor":
 		return runDoctor(args[1:])
+	case "backup":
+		return runBackup(args[1:])
 	case "audit":
 		return runAudit(args[1:])
 	case "token":
@@ -602,6 +604,57 @@ func runServe(args []string) int {
 }
 
 // ---------------------------------------------------------------------------
+// backup (S7б-1: онлайн-копия Verdict Store, blueprint п. 15.2)
+// ---------------------------------------------------------------------------
+
+// runBackup — `zond backup --out <path>`: VACUUM INTO без остановки
+// сервиса; факт копии (успех/неудача с ошибкой) — в аудит-лог (п. 14.2,
+// actor cli) — записи читает правило алертинга backup_failed (п. 17).
+func runBackup(args []string) int {
+	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
+	dbPath := fs.String("db", "zond.db", "файл Verdict Store (SQLite)")
+	out := fs.String("out", "", "путь копии (обязателен; существующий файл не перезаписывается)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *out == "" {
+		fmt.Fprintln(os.Stderr, "backup: флаг -out обязателен")
+		return 2
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "backup: store: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+	start := time.Now()
+	size, err := st.Backup(context.Background(), *out)
+	dur := time.Since(start).Round(time.Millisecond)
+	details := map[string]any{"path": *out, "duration_ms": dur.Milliseconds()}
+	if err != nil {
+		details["status"] = "fail"
+		details["error"] = err.Error()
+		_ = st.AppendAudit(context.Background(), []audit.Event{{
+			Actor: "cli", Category: audit.CatAdmin, Action: "backup",
+			Target: "backup:" + *out, Details: details, TS: time.Now().UTC(),
+		}})
+		fmt.Fprintf(os.Stderr, "backup: %v\n", err)
+		return 1
+	}
+	details["status"] = "ok"
+	details["bytes"] = size
+	if err := st.AppendAudit(context.Background(), []audit.Event{{
+		Actor: "cli", Category: audit.CatAdmin, Action: "backup",
+		Target: "backup:" + *out, Details: details, TS: time.Now().UTC(),
+	}}); err != nil {
+		fmt.Fprintf(os.Stderr, "backup: аудит: %v\n", err)
+		return 1
+	}
+	fmt.Printf("backup: OK (%s, %d байт, %s)\n", *out, size, dur)
+	return 0
+}
+
+// ---------------------------------------------------------------------------
 // doctor (S7а: preflight перед вводом в эксплуатацию, blueprint п. 15.3)
 // ---------------------------------------------------------------------------
 
@@ -921,6 +974,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  zond scan -source <имя> [-config configs] [-db zond.db] [-profile quick|deep|custom] [-llm]")
 	fmt.Fprintln(os.Stderr, "  zond agent-check [-config configs] [-online]")
 	fmt.Fprintln(os.Stderr, "  zond doctor [-config configs] [-db zond.db] [-online]")
+	fmt.Fprintln(os.Stderr, "  zond backup -out <path> [-db zond.db]")
 	fmt.Fprintln(os.Stderr, "  zond audit verify [-db zond.db]")
 	fmt.Fprintln(os.Stderr, "  zond audit export [-db zond.db] [-actor x] [-category y] [-since RFC3339] [-scan id] [-out file]")
 	fmt.Fprintln(os.Stderr, "  zond serve [-config configs] [-db zond.db] [-addr 127.0.0.1:8080] [-export-max-rows 50000] [-llm] [-scheduler] [-strict]")
