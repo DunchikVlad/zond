@@ -88,17 +88,23 @@ func TestLLMErrorStreak(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		mk("error")
 	}
-	streak, err := st.LLMErrorStreak(ctx, 6)
+	streak, agent, err := st.LLMErrorStreak(ctx, 6)
 	if err != nil {
 		t.Fatalf("LLMErrorStreak: %v", err)
 	}
 	if streak != 6 {
 		t.Errorf("streak = %d, ожидалось 6 (шесть ошибок подряд)", streak)
 	}
+	if agent != "zond-main" {
+		t.Errorf("lastErrorAgent = %q, ожидалось zond-main", agent)
+	}
 	mk("ok")
-	streak, _ = st.LLMErrorStreak(ctx, 6)
+	streak, agent, _ = st.LLMErrorStreak(ctx, 6)
 	if streak != 0 {
 		t.Errorf("streak после ok = %d, ожидалось 0", streak)
+	}
+	if agent != "" {
+		t.Errorf("lastErrorAgent после ok = %q, ожидалось пусто", agent)
 	}
 }
 

@@ -532,6 +532,7 @@ func runServe(args []string) int {
 	root := http.NewServeMux()
 	root.Handle("/api/", srv.Handler())
 	root.Handle("/saml/", srv.Handler())
+	root.Handle("/debug/vars", srv.Handler()) // expvar (п. 17) — у API-mux с auth
 	root.Handle("/", webSrv.Handler())
 
 	// Метрики инстанса в expvar (п. 17): zond/store — агрегаты за окно из
@@ -546,7 +547,12 @@ func runServe(args []string) int {
 
 	// Планировщик (инкремент 5г, п. 15/15.4): TTL-прочистка кэша, retention
 	// сканов (90 дней), расписания пересканов источников (schedule).
-	sched := scheduler.New(st, runner, log, b.Connections.Sources)
+	// Инкремент S6в: + оценка алертов (п. 17) каждые 5 минут; внешняя
+	// доставка — webhook из ENV ZOND_ALERT_WEBHOOK (п. 12, п. 20).
+	alertEval := observe.NewEvaluator(st, log,
+		observe.WithWebhook(observe.NewWebhook(os.Getenv(observe.EnvWebhook), log)))
+	sched := scheduler.New(st, runner, log, b.Connections.Sources,
+		scheduler.WithAlerts("", alertEval.Eval))
 	if *useSched {
 		if err := sched.Start(context.Background()); err != nil {
 			fmt.Fprintln(os.Stderr, "serve: scheduler:", err)

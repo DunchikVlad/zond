@@ -14,7 +14,9 @@
 //  3. периодические пересканы: для каждого источника cfg с непустым schedule
 //     (cron-выражение) — runner.Start(source, "", "scheduler"). Невалидное
 //     выражение → warn-лог + аудит scheduler/invalid_schedule {source,
-//     schedule}, источник пропускается (старт не падает).
+//     schedule}, источник пропускается (старт не падает);
+//  4. оценка алертов (S6в, п. 17) — alertsFn по расписанию specAlerts
+//     (default каждые 5 минут; подключается WithAlerts; nil — выключено).
 package scheduler
 
 import (
@@ -35,8 +37,9 @@ const actor = "scheduler"
 
 // Стандартные расписания фоновых задач (локальное время инстанса).
 const (
-	specCachePurge = "17 3 * * *" // ежедневно 03:17
-	specRetention  = "23 4 * * *" // ежедневно 04:23
+	specCachePurge = "17 3 * * *"  // ежедневно 03:17
+	specRetention  = "23 4 * * *"  // ежедневно 04:23
+	specAlerts     = "*/5 * * * *" // алертинг каждые 5 минут (п. 17)
 )
 
 // retentionAge — срок хранения сканов + вердиктов + agent_calls
@@ -62,6 +65,10 @@ type Scheduler struct {
 	purgeSpec     string
 	retentionSpec string
 	retentionAge  time.Duration
+
+	// Инкремент S6в: оценка алертов (п. 17); nil — задача не регистрируется.
+	alertsSpec string
+	alertsFn   func(ctx context.Context)
 }
 
 // Option — настройка планировщика (в тестах — ускоренные расписания).
@@ -88,6 +95,18 @@ func WithRetentionAge(d time.Duration) Option {
 	}
 }
 
+// WithAlerts подключает периодическую оценку алертов (S6в, blueprint п. 17):
+// fn запускается по cron-расписанию spec (пусто → "*/5 * * * *"). События
+// алертов пишет сама fn (аудит категории alert, actor scheduler).
+func WithAlerts(spec string, fn func(ctx context.Context)) Option {
+	return func(s *Scheduler) {
+		if spec != "" {
+			s.alertsSpec = spec
+		}
+		s.alertsFn = fn
+	}
+}
+
 // WithNowFn подменяет часы (тесты).
 func WithNowFn(fn func() time.Time) Option {
 	return func(s *Scheduler) { s.nowFn = fn }
@@ -104,6 +123,7 @@ func New(st *store.Store, runner ScanStarter, log *slog.Logger, sources []config
 		purgeSpec:     specCachePurge,
 		retentionSpec: specRetention,
 		retentionAge:  retentionAge,
+		alertsSpec:    specAlerts,
 	}
 	for _, o := range opts {
 		o(s)
@@ -124,6 +144,11 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	}
 	if _, err := c.AddFunc(s.retentionSpec, func() { s.retention(ctx) }); err != nil {
 		return fmt.Errorf("scheduler: расписание retention: %w", err)
+	}
+	if s.alertsFn != nil {
+		if _, err := c.AddFunc(s.alertsSpec, func() { s.alerts(ctx) }); err != nil {
+			return fmt.Errorf("scheduler: расписание алертов: %w", err)
+		}
 	}
 	for _, src := range s.sources {
 		if src.Schedule == "" {
@@ -193,6 +218,18 @@ func (s *Scheduler) rescan(source string) {
 		return
 	}
 	s.log.Info("scheduler: перескан запущен", "source", source, "scan_id", scanID)
+}
+
+// alerts — периодическая оценка правил алертинга (S6в, п. 17). Паника fn не
+// роняет cron-цикл (recover) — одно сломанное правило не останавливает
+// остальные фоновые задачи.
+func (s *Scheduler) alerts(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("scheduler: паника в оценке алертов", "panic", r)
+		}
+	}()
+	s.alertsFn(ctx)
 }
 
 // audit — факт выполнения фоновой задачи в аудит-лог (п. 14.2: фоновые

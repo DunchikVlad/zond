@@ -1,0 +1,22 @@
+{{template "header" .}}
+{{if .Open}}
+<p>Открыто алертов: <strong>{{.Open}}</strong>. Закрытие — автоматическое: когда правило перестаёт стрелять (оценка каждые 5 минут, scheduler).</p>
+{{else}}<p>Открытых алертов нет.</p>{{end}}
+{{if .Alerts}}
+<table>
+  <tr><th>#</th><th>Правило</th><th>Уровень</th><th>Цель</th><th>Сообщение</th><th>Создан</th><th>Последнее срабатывание</th><th>Закрыт</th></tr>
+  {{range .Alerts}}
+  <tr>
+    <td>{{.ID}}</td>
+    <td>{{.Rule}}</td>
+    <td>{{if eq .Severity "critical"}}<strong>{{.Severity}}</strong>{{else}}{{.Severity}}{{end}}</td>
+    <td>{{.Target}}</td>
+    <td>{{.Message}}</td>
+    <td>{{fmtTime .CreatedAt}}</td>
+    <td>{{fmtTime .LastSeen}}</td>
+    <td>{{if .Resolved}}{{fmtTimeP .Resolved}}{{else}}—{{end}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<p>Журнал алертов пуст.</p>{{end}}
+{{template "footer" .}}

@@ -97,6 +97,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /review/bulk", s.requireRole(auth.ActionReview, s.handleReviewBulk))
 	mux.HandleFunc("GET /drift", s.handleDrift)
 	mux.HandleFunc("GET /cost", s.handleCost)
+	mux.HandleFunc("GET /alerts", s.handleAlerts)
 	mux.HandleFunc("GET /audit", s.requireRole(auth.ActionAudit, s.handleAudit))
 	mux.HandleFunc("GET /settings", s.handleSettings)
 	return s.withAuth(s.withSecurity(mux))
@@ -490,6 +491,24 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, "cost.html", map[string]any{
 		"Subject": s.subject(r), "Title": "Экономика", "Scans": scans,
 		"ScanID": scanID, "Stats": stats, "Instance": instance,
+	})
+}
+
+// handleAlerts — журнал алертинга (S6в, п. 17): открытые и закрытые алерты
+// с фильтром состояния (?state=open|resolved). Просмотр — роль viewer
+// (операционная информация, как /cost).
+func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	state := r.URL.Query().Get("state")
+	alerts, err := s.st.AlertList(ctx, state, 500)
+	if err != nil {
+		s.renderError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	open, _ := s.st.AlertOpenCount(ctx)
+	s.render(w, http.StatusOK, "alerts.html", map[string]any{
+		"Subject": s.subject(r), "Title": "Алерты",
+		"Alerts": alerts, "Open": open, "State": state,
 	})
 }
 

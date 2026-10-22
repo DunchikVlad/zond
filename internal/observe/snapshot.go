@@ -93,7 +93,7 @@ func BuildSnapshot(ctx context.Context, st *store.Store, meter *Meter, window ti
 			snap.LLM.CacheHitShare = float64(w.CacheHits) / float64(w.Calls+w.CacheHits)
 		}
 	}
-	if streak, err := st.LLMErrorStreak(ctx, 6); err == nil {
+	if streak, _, err := st.LLMErrorStreak(ctx, 6); err == nil {
 		snap.LLM.UnavailableStreak = streak
 		snap.LLM.Unavailable = streak > 5
 	}

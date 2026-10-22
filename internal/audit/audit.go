@@ -23,9 +23,8 @@ import (
 	"time"
 )
 
-// Категории событий (минимальный набор blueprint п. 14.2). Неиспользуемые
-// пока категории (auth, authorization, review, config, secrets, admin)
-// резервируются для этапа 5b+ (SSO, API, UI).
+// Категории событий (blueprint п. 14.2). auth/authorization/review/config/
+// secrets/admin введены инкрементами 5в–5г; alert — алертинг (S6в, п. 17).
 const (
 	CatAuth    = "auth"          // SSO-входы/неудачи, logout, SLO, admin-токен
 	CatAuthz   = "authorization" // отказы 403
@@ -36,6 +35,7 @@ const (
 	CatExport  = "export"        // экспорт вердиктов и аудита
 	CatSecrets = "secrets"       // факт резолва секрета (без значений)
 	CatAdmin   = "admin"         // роли, API-токены
+	CatAlert   = "alert"         // алертинг (п. 17): raise/resolve событий правил
 )
 
 // Event — аудит-событие до записи (без seq/hash — они назначаются при вставке).

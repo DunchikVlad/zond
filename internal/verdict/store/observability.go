@@ -54,30 +54,31 @@ func (s *Store) LLMWindowStats(ctx context.Context, since time.Time) (*LLMWindow
 }
 
 // LLMErrorStreak — число последних подряд вызовов со статусом error
-// (событие llm_unavailable, п. 17 «>5 подряд»). Проверяется до max последних
-// вызовов; 0 — последний вызов не ошибка или вызовов нет.
-func (s *Store) LLMErrorStreak(ctx context.Context, max int) (int, error) {
+// (событие llm_unavailable, п. 17 «>5 подряд») и агент последней ошибки
+// (цель алерта). Проверяется до max последних вызовов; streak=0 — последний
+// вызов не ошибка или вызовов нет.
+func (s *Store) LLMErrorStreak(ctx context.Context, max int) (streak int, lastErrorAgent string, err error) {
 	if max <= 0 {
 		max = 6
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT status FROM agent_calls ORDER BY created_at DESC, rowid DESC LIMIT ?`, max)
+		SELECT status, agent_id FROM agent_calls ORDER BY created_at DESC, rowid DESC LIMIT ?`, max)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	defer rows.Close()
-	var streak int
 	for rows.Next() {
-		var status string
-		if err := rows.Scan(&status); err != nil {
-			return 0, err
+		var status, agent string
+		if err := rows.Scan(&status, &agent); err != nil {
+			return 0, "", err
 		}
 		if status != "error" {
 			break
 		}
 		streak++
+		lastErrorAgent = agent
 	}
-	return streak, rows.Err()
+	return streak, lastErrorAgent, rows.Err()
 }
 
 // SourceOverview — сводка по последнему прогону источника (п. 17: дашборды

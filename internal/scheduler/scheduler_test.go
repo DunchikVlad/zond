@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -199,5 +200,35 @@ func TestSchedulerLifecycle(t *testing.T) {
 	defer sch.Stop()
 	if err := sch.Start(context.Background()); err == nil {
 		t.Fatal("повторный Start должен вернуть ошибку")
+	}
+}
+
+// TestSchedulerAlerts — задача оценки алертов (S6в, п. 17): fn вызывается
+// по расписанию; паника fn не роняет cron-цикл (recover).
+func TestSchedulerAlerts(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	var calls atomic.Int64
+	done := make(chan struct{})
+	sch := New(st, nil, nil, nil,
+		WithSpecs("@yearly", "@yearly"),
+		WithAlerts("@every 1s", func(ctx context.Context) {
+			if calls.Add(1) >= 2 {
+				select {
+				case done <- struct{}{}:
+				default:
+				}
+			}
+		}))
+	if err := sch.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer sch.Stop()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("alerts fn не вызвана (calls=%d)", calls.Load())
 	}
 }

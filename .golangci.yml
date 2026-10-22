@@ -31,17 +31,20 @@ linters:
           # net/http разрешён только в internal/agentproxy (единственная точка
           # вызова LLM, blueprint п. 10.1), в internal/api (REST-сервер этапа
           # 5б — не вызывает LLM, ADR-impl-5б), в internal/auth (SAML SP этапа
-          # 5в-5 — HTTP-протокол SSO, не вызывает LLM, ADR-impl-5в) и
+          # 5в-5 — HTTP-протокол SSO, не вызывает LLM, ADR-impl-5в),
           # internal/web (server-rendered UI этапа 5г — не вызывает LLM,
-          # ADR-impl-5г) и в *_test.go (fake-LLM httptest). Вызовы LLM вне
-          # proxy правило по-прежнему поймает: изолирующим является agentproxy,
-          # а не отсутствие net/http в api/auth/web.
+          # ADR-impl-5г), internal/observe (исходящий webhook алертинга этапа
+          # S6в — не вызывает LLM, ADR-impl-6в) и в *_test.go (fake-LLM
+          # httptest). Вызовы LLM вне proxy правило по-прежнему поймает:
+          # изолирующим является agentproxy, а не отсутствие net/http в
+          # api/auth/web/observe.
           files:
             - "$all"
             - "!**/internal/agentproxy/**"
             - "!**/internal/api/**"
             - "!**/internal/auth/**"
             - "!**/internal/web/**"
+            - "!**/internal/observe/**"
             - "!**/cmd/**"
             - "!**/*_test.go"
           deny:
