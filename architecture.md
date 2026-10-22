@@ -326,6 +326,7 @@ serve (1 процесс)
 | `internal/logging` | JSON-лог, correlation id, redact | Logger, Redactor |
 | `internal/observe` | метрики и наблюдаемость (п. 17, S6в): счётчики процесса, expvar, снимки из store, алертинг + webhook | Meter, Snapshot, Evaluator, Webhook |
 | `internal/scheduler` | cron, окна, TTL-jobs | Scheduler |
+| `internal/doctor` | preflight перед вводом в эксплуатацию (п. 15.3, S7а) | Report, Run |
 | `internal/evalset` | генератор эталонного eval-датасета (п. 16.6, S6а) | Generator, Column, Manifest, Read |
 | `internal/evalharness` | eval-harness: каскад по датасету, F1, sweep tau, $/1000 колонок (п. 16.6, S6б) | Run, BuildReport, WriteReport |
 | `evals/`, `cmd/eval`, `cmd/seed` | датасет, отчёты F1/$, демо-данные | Generator, Harness |
