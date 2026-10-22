@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -68,6 +69,8 @@ func run(args []string) int {
 		return runDoctor(args[1:])
 	case "backup":
 		return runBackup(args[1:])
+	case "restore":
+		return runRestore(args[1:])
 	case "audit":
 		return runAudit(args[1:])
 	case "token":
@@ -568,10 +571,16 @@ func runServe(args []string) int {
 	// сканов (90 дней), расписания пересканов источников (schedule).
 	// Инкремент S6в: + оценка алертов (п. 17) каждые 5 минут; внешняя
 	// доставка — webhook из ENV ZOND_ALERT_WEBHOOK (п. 12, п. 20).
+	backupConfigured := b.Connections.Backup.Schedule != ""
 	alertEval := observe.NewEvaluator(st, log,
-		observe.WithWebhook(observe.NewWebhook(os.Getenv(observe.EnvWebhook), log)))
-	sched := scheduler.New(st, runner, log, b.Connections.Sources,
-		scheduler.WithAlerts("", alertEval.Eval))
+		observe.WithWebhook(observe.NewWebhook(os.Getenv(observe.EnvWebhook), log)),
+		observe.WithBackupExpected(backupConfigured))
+	schedOpts := []scheduler.Option{scheduler.WithAlerts("", alertEval.Eval)}
+	if backupConfigured {
+		// Расписание копий Verdict Store (п. 15.2): VACUUM INTO в backup.dir.
+		schedOpts = append(schedOpts, scheduler.WithBackup(b.Connections.Backup.Schedule, b.Connections.Backup.Dir))
+	}
+	sched := scheduler.New(st, runner, log, b.Connections.Sources, schedOpts...)
 	if *useSched {
 		if err := sched.Start(context.Background()); err != nil {
 			fmt.Fprintln(os.Stderr, "serve: scheduler:", err)
@@ -651,6 +660,61 @@ func runBackup(args []string) int {
 		return 1
 	}
 	fmt.Printf("backup: OK (%s, %d байт, %s)\n", *out, size, dur)
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// restore (S7б-2: учебное восстановление из копии, DoD п. 22 / п. 15.2)
+// ---------------------------------------------------------------------------
+
+// runRestore — `zond restore --from <copy> --to <dir>`: копия переносится
+// в пустой каталог как zond.db, открывается (goose up = migrate), цепочка
+// аудита пересчитывается. Это автоматизация учебного восстановления из DoD.
+func runRestore(args []string) int {
+	fs := flag.NewFlagSet("restore", flag.ContinueOnError)
+	from := fs.String("from", "", "файл копии (обязателен)")
+	to := fs.String("to", "", "пустой каталог восстановления (обязателен)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *from == "" || *to == "" {
+		fmt.Fprintln(os.Stderr, "restore: флаги -from и -to обязательны")
+		return 2
+	}
+	if _, err := os.Stat(*from); err != nil {
+		fmt.Fprintf(os.Stderr, "restore: копия %s: %v\n", *from, err)
+		return 1
+	}
+	if err := os.MkdirAll(*to, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "restore: каталог: %v\n", err)
+		return 1
+	}
+	dst := filepath.Join(*to, "zond.db")
+	if _, err := os.Stat(dst); err == nil {
+		fmt.Fprintf(os.Stderr, "restore: %s уже существует — каталог не пустой (fail-closed)\n", dst)
+		return 1
+	}
+	raw, err := os.ReadFile(*from)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "restore: чтение копии: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(dst, raw, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, "restore: запись: %v\n", err)
+		return 1
+	}
+	st, err := store.Open(dst) // migrate на копии (DoD: migrate + hash-chain)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "restore: открытие восстановленной БД: %v\n", err)
+		return 1
+	}
+	defer st.Close()
+	rep, err := st.AuditVerify(context.Background())
+	if err != nil || !rep.OK() {
+		fmt.Fprintf(os.Stderr, "restore: hash-chain аудита: %v (%+v)\n", err, rep)
+		return 1
+	}
+	fmt.Printf("restore: OK (%s: %d записей аудита, цепочка сходится)\n", dst, rep.Checked)
 	return 0
 }
 
@@ -975,6 +1039,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  zond agent-check [-config configs] [-online]")
 	fmt.Fprintln(os.Stderr, "  zond doctor [-config configs] [-db zond.db] [-online]")
 	fmt.Fprintln(os.Stderr, "  zond backup -out <path> [-db zond.db]")
+	fmt.Fprintln(os.Stderr, "  zond restore -from <копия> -to <пустой каталог>")
 	fmt.Fprintln(os.Stderr, "  zond audit verify [-db zond.db]")
 	fmt.Fprintln(os.Stderr, "  zond audit export [-db zond.db] [-actor x] [-category y] [-since RFC3339] [-scan id] [-out file]")
 	fmt.Fprintln(os.Stderr, "  zond serve [-config configs] [-db zond.db] [-addr 127.0.0.1:8080] [-export-max-rows 50000] [-llm] [-scheduler] [-strict]")

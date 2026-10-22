@@ -7,6 +7,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -230,5 +232,53 @@ func TestSchedulerAlerts(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("alerts fn не вызвана (calls=%d)", calls.Load())
+	}
+}
+
+// TestSchedulerBackup — задача периодической копии (S7б, п. 15.2): файл
+// появляется в каталоге, попытка зафиксирована в аудите (backup ok).
+func TestSchedulerBackup(t *testing.T) {
+	st := newTestStore(t)
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	sch := New(st, nil, nil, nil,
+		WithSpecs("@yearly", "@yearly"),
+		WithBackup("@every 1s", dir))
+	if err := sch.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer sch.Stop()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		evs, err := st.LatestBackupEvents(ctx, 1)
+		if err == nil && len(evs) == 1 && evs[0].Status == "ok" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("backup-событие не появилось: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if evs, _ := st.LatestBackupEvents(ctx, 1); len(evs) != 1 || evs[0].Path == "" {
+		t.Fatalf("событие без пути: %+v", evs)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("файл копии не создан: %v", err)
+	}
+}
+
+// TestSchedulerBackupFailureAudited — неудача копии (каталог недоступен/
+// не существует) тоже пишется в аудит: её видит правило backup_failed.
+func TestSchedulerBackupFailureAudited(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sch := New(st, nil, nil, nil, WithBackup("", filepath.Join(t.TempDir(), "нет-такого-каталога")))
+	sch.backup(ctx) // прямой вызов без cron
+	evs, err := st.LatestBackupEvents(ctx, 1)
+	if err != nil || len(evs) != 1 || evs[0].Status != "fail" || evs[0].Error == "" {
+		t.Fatalf("неудача не зафиксирована: %+v err=%v", evs, err)
 	}
 }

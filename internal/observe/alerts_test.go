@@ -199,3 +199,105 @@ func TestNewWebhookEmptyURL(t *testing.T) {
 		t.Error("пустой URL должен давать nil")
 	}
 }
+
+// auditBackup пишет событие backup в аудит-store (источник правила).
+func auditBackup(t *testing.T, st *store.Store, status, errMsg string, ts time.Time) {
+	t.Helper()
+	d := map[string]any{"status": status, "path": "/b/x.db"}
+	if errMsg != "" {
+		d["error"] = errMsg
+	}
+	if err := st.AppendAudit(context.Background(), []audit.Event{{
+		Actor: "scheduler", Category: audit.CatAdmin, Action: "backup",
+		Target: "backup:/b/x.db", Details: d, TS: ts,
+	}}); err != nil {
+		t.Fatalf("AppendAudit backup: %v", err)
+	}
+}
+
+// TestRuleBackupFailed — четыре сценария: последняя попытка fail; RPO
+// нарушен (расписание есть, успешной копии >24ч); свежая ok — тишина;
+// расписания нет и попыток не было — тишина.
+func TestRuleBackupFailed(t *testing.T) {
+	cases := []struct {
+		name           string
+		backupExpected bool
+		seed           func(t *testing.T, st *store.Store, now time.Time)
+		expected       bool
+	}{
+		{
+			name:           "последняя попытка неудачна",
+			backupExpected: true,
+			seed: func(t *testing.T, st *store.Store, now time.Time) {
+				auditBackup(t, st, "ok", "", now.Add(-3*time.Hour))
+				auditBackup(t, st, "fail", "нет места", now.Add(-time.Hour))
+			},
+			expected: true,
+		},
+		{
+			name:           "RPO нарушен: успеха не было >24ч",
+			backupExpected: true,
+			seed: func(t *testing.T, st *store.Store, now time.Time) {
+				auditBackup(t, st, "ok", "", now.Add(-25*time.Hour))
+			},
+			expected: true,
+		},
+		{
+			name:           "расписание есть, попыток не было вообще",
+			backupExpected: true,
+			seed:           func(t *testing.T, st *store.Store, now time.Time) {},
+			expected:       true,
+		},
+		{
+			name:           "свежая успешная копия",
+			backupExpected: true,
+			seed: func(t *testing.T, st *store.Store, now time.Time) {
+				auditBackup(t, st, "ok", "", now.Add(-time.Hour))
+			},
+			expected: false,
+		},
+		{
+			name:           "нет расписания и попыток — молчим",
+			backupExpected: false,
+			seed:           func(t *testing.T, st *store.Store, now time.Time) {},
+			expected:       false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openStore(t)
+			now := time.Now().UTC()
+			tc.seed(t, st, now)
+			e := NewEvaluator(st, nil,
+				WithBackupExpected(tc.backupExpected),
+				WithNowFn(func() time.Time { return now }))
+			e.Eval(context.Background())
+			open, _ := st.AlertOpenCount(context.Background())
+			if tc.expected && open != 1 {
+				t.Fatalf("алертов %d, ожидался 1 (backup_failed)", open)
+			}
+			if !tc.expected && open != 0 {
+				list, _ := st.AlertList(context.Background(), "open", 5)
+				t.Fatalf("алертов %d, ожидалось 0: %+v", open, list)
+			}
+		})
+	}
+}
+
+// TestRuleBackupFailedResolves — после успешной копии алерт закрывается.
+func TestRuleBackupFailedResolves(t *testing.T) {
+	st := openStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	auditBackup(t, st, "fail", "нет места", now.Add(-2*time.Hour))
+	e := NewEvaluator(st, nil, WithBackupExpected(true), WithNowFn(func() time.Time { return now }))
+	e.Eval(ctx)
+	if n, _ := st.AlertOpenCount(ctx); n != 1 {
+		t.Fatalf("после fail: open=%d", n)
+	}
+	auditBackup(t, st, "ok", "", now.Add(-time.Minute))
+	e.Eval(ctx)
+	if n, _ := st.AlertOpenCount(ctx); n != 0 {
+		t.Fatalf("после ok: open=%d, ожидалось 0", n)
+	}
+}

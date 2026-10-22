@@ -30,6 +30,7 @@ const (
 	RulePendingBacklog  = "pending_backlog"
 	RuleLLMUnavailable  = "llm_unavailable"
 	RuleAuditChainBreak = "audit_chain_break"
+	RuleBackupFailed    = "backup_failed" // S7б: последняя копия неудачна или RPO >24ч
 
 	// Severity-уровни.
 	SeverityWarning  = "warning"
@@ -38,6 +39,9 @@ const (
 
 // DefaultPendingThreshold — порог R9: pending > 500 вердиктов на источник.
 const DefaultPendingThreshold = 500
+
+// backupRPOWindow — RPO резервного копирования (п. 15.2: ≤24 ч).
+const backupRPOWindow = 24 * time.Hour
 
 // actor — автор аудит-событий алертинга (п. 14.2: фоновые задачи).
 const actor = "scheduler"
@@ -49,6 +53,7 @@ type Evaluator struct {
 	log              *slog.Logger
 	nowFn            func() time.Time
 	pendingThreshold int
+	backupExpected   bool // расписание backup задано (RPO-контроль, п. 15.2)
 	webhook          *Webhook
 }
 
@@ -72,6 +77,13 @@ func WithWebhook(w *Webhook) Option {
 // WithNowFn подменяет часы (тесты).
 func WithNowFn(fn func() time.Time) Option {
 	return func(e *Evaluator) { e.nowFn = fn }
+}
+
+// WithBackupExpected помечает, что расписание backup задано (п. 15.2): тогда
+// контролируется RPO — успешная копия не старше 24 ч (иначе правило
+// смотрит только на явные неудачи).
+func WithBackupExpected(v bool) Option {
+	return func(e *Evaluator) { e.backupExpected = v }
 }
 
 // NewEvaluator собирает оценщик; log nil → discard.
@@ -112,7 +124,7 @@ func (e *Evaluator) Eval(ctx context.Context) {
 		}
 	}
 	resolved, err := e.st.AlertResolveNotIn(ctx, []string{
-		RuleBudgetExceeded, RulePendingBacklog, RuleLLMUnavailable, RuleAuditChainBreak,
+		RuleBudgetExceeded, RulePendingBacklog, RuleLLMUnavailable, RuleAuditChainBreak, RuleBackupFailed,
 	}, active, e.nowFn())
 	if err != nil {
 		e.log.Error("alerts: закрытие алертов", "error", err)
@@ -142,6 +154,7 @@ func (e *Evaluator) collect(ctx context.Context) []firing {
 	collect(RulePendingBacklog, func() []firing { return e.rulePending(ctx) })
 	collect(RuleLLMUnavailable, func() []firing { return e.ruleLLMUnavailable(ctx) })
 	collect(RuleAuditChainBreak, func() []firing { return e.ruleChain(ctx) })
+	collect(RuleBackupFailed, func() []firing { return e.ruleBackup(ctx) })
 	return out
 }
 
@@ -220,6 +233,43 @@ func (e *Evaluator) ruleChain(ctx context.Context) []firing {
 			rep.BrokenAt, rep.Reason),
 		details: map[string]any{"broken_at": rep.BrokenAt, "reason": rep.Reason, "checked": rep.Checked},
 	}}
+}
+
+// ruleBackup — backup_failed (п. 17, п. 15.2): стреляет, если последняя
+// попытка копии неудачна; а при заданном расписании — и когда успешной
+// копии не было дольше RPO (24 ч). Источник событий — аудит backup.
+func (e *Evaluator) ruleBackup(ctx context.Context) []firing {
+	events, err := e.st.LatestBackupEvents(ctx, 10)
+	if err != nil {
+		e.log.Error("alerts: backup_failed", "error", err)
+		return nil
+	}
+	now := e.nowFn()
+	if len(events) > 0 && events[0].Status == "fail" {
+		return []firing{{
+			rule: RuleBackupFailed, severity: SeverityWarning, target: "verdict_store",
+			message: fmt.Sprintf("последняя попытка резервного копирования неудачна: %s (путь %s)",
+				events[0].Error, events[0].Path),
+			details: map[string]any{"seq": events[0].Seq, "path": events[0].Path, "error": events[0].Error},
+		}}
+	}
+	if e.backupExpected {
+		recentOK := false
+		for _, ev := range events {
+			if ev.Status == "ok" && now.Sub(ev.TS) <= backupRPOWindow {
+				recentOK = true
+				break
+			}
+		}
+		if !recentOK {
+			return []firing{{
+				rule: RuleBackupFailed, severity: SeverityWarning, target: "verdict_store",
+				message: fmt.Sprintf("успешной копии Verdict Store не было более %s (RPO п. 15.2)", backupRPOWindow),
+				details: map[string]any{"rpo": backupRPOWindow.String(), "attempts": len(events)},
+			}}
+		}
+	}
+	return nil
 }
 
 // audit — событие подъёма в аудит-лог (п. 14.2). Ошибка — лог: алерт уже

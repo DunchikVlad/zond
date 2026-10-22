@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -46,4 +47,47 @@ func (s *Store) Backup(ctx context.Context, outPath string) (int64, error) {
 // (локальное время инстанса; секундная точность достаточна для расписания).
 func BackupFilename(now time.Time) string {
 	return "zond-" + now.Format("20060102-150405") + ".db"
+}
+
+// BackupEvent — аудит-запись о попытке копии (п. 14.2, п. 15.2): источник
+// данных для правила алертинга backup_failed (п. 17).
+type BackupEvent struct {
+	Seq    int64
+	Status string // ok | fail
+	Path   string
+	Error  string
+	TS     time.Time
+}
+
+// LatestBackupEvents — последние записи backup из аудит-лога (свежие первыми).
+func (s *Store) LatestBackupEvents(ctx context.Context, limit int) ([]BackupEvent, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT seq, ts, details_json FROM audit_log
+		WHERE category = 'admin' AND action = 'backup'
+		ORDER BY seq DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BackupEvent
+	for rows.Next() {
+		var ev BackupEvent
+		var ts, dj string
+		if err := rows.Scan(&ev.Seq, &ts, &dj); err != nil {
+			return nil, err
+		}
+		ev.TS, _ = time.Parse(time.RFC3339, ts)
+		var d struct {
+			Status string `json:"status"`
+			Path   string `json:"path"`
+			Error  string `json:"error"`
+		}
+		_ = json.Unmarshal([]byte(dj), &d)
+		ev.Status, ev.Path, ev.Error = d.Status, d.Path, d.Error
+		out = append(out, ev)
+	}
+	return out, rows.Err()
 }

@@ -94,3 +94,41 @@ func TestBackupFilename(t *testing.T) {
 		t.Errorf("BackupFilename = %q", got)
 	}
 }
+
+// TestLatestBackupEvents — аудит-записи backup парсятся в BackupEvent
+// (источник правила backup_failed, п. 17).
+func TestLatestBackupEvents(t *testing.T) {
+	st := openTest(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if evs, err := st.LatestBackupEvents(ctx, 5); err != nil || len(evs) != 0 {
+		t.Fatalf("пустой журнал: %+v err=%v", evs, err)
+	}
+	auditBackup := func(status, path, errMsg string, ts time.Time) {
+		t.Helper()
+		d := map[string]any{"status": status, "path": path}
+		if errMsg != "" {
+			d["error"] = errMsg
+		}
+		if err := st.AppendAudit(ctx, []audit.Event{{
+			Actor: "scheduler", Category: audit.CatAdmin, Action: "backup",
+			Target: "backup:" + path, Details: d, TS: ts,
+		}}); err != nil {
+			t.Fatalf("AppendAudit: %v", err)
+		}
+	}
+	auditBackup("ok", "/b/1.db", "", now.Add(-2*time.Hour))
+	auditBackup("fail", "/b/2.db", "нет места", now.Add(-time.Hour))
+
+	evs, err := st.LatestBackupEvents(ctx, 5)
+	if err != nil || len(evs) != 2 {
+		t.Fatalf("events: %+v err=%v", evs, err)
+	}
+	if evs[0].Status != "fail" || evs[0].Error != "нет места" || evs[0].Path != "/b/2.db" {
+		t.Errorf("последнее событие: %+v", evs[0])
+	}
+	if evs[1].Status != "ok" || evs[1].Path != "/b/1.db" {
+		t.Errorf("предпоследнее событие: %+v", evs[1])
+	}
+}

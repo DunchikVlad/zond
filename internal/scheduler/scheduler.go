@@ -16,13 +16,17 @@
 //     выражение → warn-лог + аудит scheduler/invalid_schedule {source,
 //     schedule}, источник пропускается (старт не падает);
 //  4. оценка алертов (S6в, п. 17) — alertsFn по расписанию specAlerts
-//     (default каждые 5 минут; подключается WithAlerts; nil — выключено).
+//     (default каждые 5 минут; подключается WithAlerts; nil — выключено);
+//  5. резервное копирование (S7б, п. 15.2) — online-копия БД в backupDir по
+//     расписанию backupSpec (подключается WithBackup; пусто — выключено).
+//     Факт каждой попытки (ok/fail) — в аудит, читает правило backup_failed.
 package scheduler
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -69,6 +73,10 @@ type Scheduler struct {
 	// Инкремент S6в: оценка алертов (п. 17); nil — задача не регистрируется.
 	alertsSpec string
 	alertsFn   func(ctx context.Context)
+
+	// Инкремент S7б: периодическая копия БД (п. 15.2); пустой spec — выключено.
+	backupSpec string
+	backupDir  string
 }
 
 // Option — настройка планировщика (в тестах — ускоренные расписания).
@@ -104,6 +112,17 @@ func WithAlerts(spec string, fn func(ctx context.Context)) Option {
 			s.alertsSpec = spec
 		}
 		s.alertsFn = fn
+	}
+}
+
+// WithBackup подключает периодическую онлайн-копию БД (S7б, п. 15.2):
+// VACUUM INTO в backupDir по cron-расписанию spec (конфиг connections.yaml
+// backup.{schedule,dir}). Попытка (ok/fail с ошибкой) — в аудит backup.
+// Регистрация задачи — только при непустом spec (Start).
+func WithBackup(spec, dir string) Option {
+	return func(s *Scheduler) {
+		s.backupSpec = spec
+		s.backupDir = dir
 	}
 }
 
@@ -148,6 +167,11 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	if s.alertsFn != nil {
 		if _, err := c.AddFunc(s.alertsSpec, func() { s.alerts(ctx) }); err != nil {
 			return fmt.Errorf("scheduler: расписание алертов: %w", err)
+		}
+	}
+	if s.backupSpec != "" {
+		if _, err := c.AddFunc(s.backupSpec, func() { s.backup(ctx) }); err != nil {
+			return fmt.Errorf("scheduler: расписание backup: %w", err)
 		}
 	}
 	for _, src := range s.sources {
@@ -230,6 +254,25 @@ func (s *Scheduler) alerts(ctx context.Context) {
 		}
 	}()
 	s.alertsFn(ctx)
+}
+
+// backup — периодическая онлайн-копия БД (S7б, п. 15.2). Каталог обязан
+// существовать (конфиг оператора): неудача — тоже факт в аудите (ok/fail) —
+// её видит правило backup_failed (п. 17).
+func (s *Scheduler) backup(ctx context.Context) {
+	out := filepath.Join(s.backupDir, store.BackupFilename(s.nowFn()))
+	size, err := s.st.Backup(ctx, out)
+	details := map[string]any{"path": out, "actor": "scheduler"}
+	if err != nil {
+		details["status"] = "fail"
+		details["error"] = err.Error()
+		s.log.Error("scheduler: backup неудачен", "path", out, "error", err)
+	} else {
+		details["status"] = "ok"
+		details["bytes"] = size
+		s.log.Info("scheduler: backup выполнен", "path", out, "bytes", size)
+	}
+	s.audit(ctx, "backup", "backup:"+out, details)
 }
 
 // audit — факт выполнения фоновой задачи в аудит-лог (п. 14.2: фоновые
