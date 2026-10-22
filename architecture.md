@@ -324,7 +324,7 @@ serve (1 процесс)
 | `internal/secrets` | Resolver ENV/Vault | Resolver, LeaseManager |
 | `internal/audit` | hash-chain, sink | Auditor, Chain |
 | `internal/logging` | JSON-лог, correlation id, redact | Logger, Redactor |
-| `internal/observe` | agent_calls-учёт, expvar, OTel | Meter, Tracer |
+| `internal/observe` | метрики и наблюдаемость (п. 17, S6в): счётчики процесса, expvar, снимки из store, алертинг + webhook | Meter, Snapshot, Evaluator, Webhook |
 | `internal/scheduler` | cron, окна, TTL-jobs | Scheduler |
 | `internal/evalset` | генератор эталонного eval-датасета (п. 16.6, S6а) | Generator, Column, Manifest, Read |
 | `internal/evalharness` | eval-harness: каскад по датасету, F1, sweep tau, $/1000 колонок (п. 16.6, S6б) | Run, BuildReport, WriteReport |
