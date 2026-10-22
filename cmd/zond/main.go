@@ -29,6 +29,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/connector"
 	_ "github.com/DunchikVlad/zond/internal/connector/clickhouse" // регистрация по конвенции путей
 	_ "github.com/DunchikVlad/zond/internal/connector/mongodb"    // регистрация по конвенции путей
+	"github.com/DunchikVlad/zond/internal/doctor"
 	"github.com/DunchikVlad/zond/internal/logging"
 	"github.com/DunchikVlad/zond/internal/observe"
 	"github.com/DunchikVlad/zond/internal/scanengine"
@@ -63,6 +64,8 @@ func run(args []string) int {
 		return runScan(args[1:])
 	case "agent-check":
 		return runAgentCheck(args[1:])
+	case "doctor":
+		return runDoctor(args[1:])
 	case "audit":
 		return runAudit(args[1:])
 	case "token":
@@ -440,8 +443,22 @@ func runServe(args []string) int {
 	exportMax := fs.Int("export-max-rows", 50000, "лимит строк экспорта (п. 11.2)")
 	useLLM := fs.Bool("llm", false, "подключить LLM-слой при старте сканов через API")
 	useSched := fs.Bool("scheduler", true, "запускать встроенный планировщик (TTL-кэш, retention, пересканы)")
+	strict := fs.Bool("strict", false, "preflight doctor перед стартом: FAIL блокирует serve (п. 15.3)")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *strict {
+		b, err := config.LoadAll(*dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "serve -strict: конфигурация: %v\n", err)
+			return 2
+		}
+		rep := doctor.Run(context.Background(), b, *dbPath, doctor.Options{Online: true})
+		rep.Text(os.Stderr)
+		if rep.HasFail() {
+			fmt.Fprintln(os.Stderr, "serve -strict: preflight doctor не пройден — старт отменён (п. 15.3)")
+			return 1
+		}
 	}
 	log := logging.New(os.Stderr, "info")
 	b, err := config.LoadAll(*dir)
@@ -579,6 +596,33 @@ func runServe(args []string) int {
 	log.Info("serve: старт", "addr", *addr, "db", *dbPath, "llm", *useLLM)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// doctor (S7а: preflight перед вводом в эксплуатацию, blueprint п. 15.3)
+// ---------------------------------------------------------------------------
+
+// runDoctor — таблица OK/FAIL/WARN/SKIP по инстансу; код выхода 1 при любом
+// FAIL (0 — всё чисто, 2 — ошибка использования/конфигурации).
+func runDoctor(args []string) int {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	dir := fs.String("config", "configs", "каталог с конфигурационными файлами")
+	dbPath := fs.String("db", "zond.db", "файл Verdict Store (SQLite)")
+	online := fs.Bool("online", false, "выполнить сетевые проверки (Ping источников, DNS и пробные вызовы агентов)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	b, err := config.LoadAll(*dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "doctor: конфигурация: %v\n", err)
+		b = nil // отчёт всё равно строится: config.load FAIL + независимые проверки
+	}
+	rep := doctor.Run(context.Background(), b, *dbPath, doctor.Options{Online: *online})
+	rep.Text(os.Stdout)
+	if rep.HasFail() {
 		return 1
 	}
 	return 0
@@ -876,9 +920,10 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  zond config validate [-dir configs]")
 	fmt.Fprintln(os.Stderr, "  zond scan -source <имя> [-config configs] [-db zond.db] [-profile quick|deep|custom] [-llm]")
 	fmt.Fprintln(os.Stderr, "  zond agent-check [-config configs] [-online]")
+	fmt.Fprintln(os.Stderr, "  zond doctor [-config configs] [-db zond.db] [-online]")
 	fmt.Fprintln(os.Stderr, "  zond audit verify [-db zond.db]")
 	fmt.Fprintln(os.Stderr, "  zond audit export [-db zond.db] [-actor x] [-category y] [-since RFC3339] [-scan id] [-out file]")
-	fmt.Fprintln(os.Stderr, "  zond serve [-config configs] [-db zond.db] [-addr 127.0.0.1:8080] [-export-max-rows 50000] [-llm] [-scheduler]")
+	fmt.Fprintln(os.Stderr, "  zond serve [-config configs] [-db zond.db] [-addr 127.0.0.1:8080] [-export-max-rows 50000] [-llm] [-scheduler] [-strict]")
 	fmt.Fprintln(os.Stderr, "  zond token issue -name <имя> -scopes read,export [-ttl 2160h] [-db zond.db]")
 	fmt.Fprintln(os.Stderr, "  zond token list [-db zond.db]")
 	fmt.Fprintln(os.Stderr, "  zond token revoke -id <id> [-db zond.db]")
