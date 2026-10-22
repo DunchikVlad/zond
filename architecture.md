@@ -317,7 +317,7 @@ serve (1 процесс)
 | `internal/agentproxy` | изоляция/маск/кэш/лимиты/бюджет | Proxy, Masker, Cache, Semaphore |
 | `internal/agentproxy/prompts` | промпты vN (embed.FS) | — |
 | `internal/ensemble` | правила голосования, эскалация | Ensemble, VerdictBuilder |
-| `internal/verdict` (+`/store` `/drift`) | домен вердикта, SQLite, дрейф | Verdict, Store, DriftComparer |
+| `internal/verdict` (+`/store` `/drift`) | домен вердикта, SQLite (вкл. backup VACUUM INTO п. 15.2), дрейф | Verdict, Store, Backup, DriftComparer |
 | `internal/scanengine` | FSM скана, воркеры, чекпоинты | Engine, ScanFSM, Checkpoint |
 | `internal/auth` | SAML SP, сессии, роли | SP, SessionStore, RBAC |
 | `internal/api` / `internal/web` | REST, UI | Handlers, Templates |
