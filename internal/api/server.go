@@ -31,6 +31,7 @@ const (
 	CodeSourceUnavailable = "source_unavailable"
 	CodeScanNotFound      = "scan_not_found"
 	CodeReviewConflict    = "review_conflict"
+	CodeRateLimited       = "rate_limited" // п. 14: блокировка brute-force (S7г)
 	CodeInternal          = "internal"
 )
 

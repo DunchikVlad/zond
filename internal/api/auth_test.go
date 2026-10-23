@@ -251,3 +251,42 @@ func TestHealthOpenUnderAuth(t *testing.T) {
 		t.Fatalf("ready открыт: %d", code)
 	}
 }
+
+// Brute-force входа (п. 14, S7г): после maxFails неудач с одного IP —
+// 429 и аудит auth_rate_limited; верные креденшелы сбрасывают счётчик.
+// httptest.NewRequest шлёт всегда с одного RemoteAddr — ключ лимитера общий.
+func TestAuthRateLimitBruteForce(t *testing.T) {
+	srv, st := newTestServer(t, WithAuth(AuthConfig{
+		Enabled:    true,
+		AdminToken: "master-key",
+		Sessions:   auth.NewSessionStore(time.Hour),
+		Limiter:    auth.NewAttemptLimiter(3, time.Minute, time.Hour),
+	}))
+	mustScan(t, st, "s1", "ch", "done")
+
+	for i := 0; i < 3; i++ {
+		if code := doAuth(t, srv, "GET", "/api/v1/scans", "", nil); code != http.StatusUnauthorized {
+			t.Fatalf("попытка %d: ожидался 401, got %d", i, code)
+		}
+	}
+	if code := doAuth(t, srv, "GET", "/api/v1/scans", "", nil); code != http.StatusTooManyRequests {
+		t.Fatalf("после maxFails ожидался 429: %d", code)
+	}
+	// Блокировка не пускает даже с верным admin-token.
+	if code := doAuth(t, srv, "GET", "/api/v1/export?scan_id=s1", "", map[string]string{"X-Admin-Token": "master-key"}); code != http.StatusTooManyRequests {
+		t.Fatalf("блок подавляет и верный токен: %d", code)
+	}
+	entries, _ := st.AuditList(t.Context(), audit.Filter{Category: audit.CatAuth})
+	var limited, failures int
+	for _, e := range entries {
+		switch e.Action {
+		case "auth_rate_limited":
+			limited++
+		case "api_auth_failure":
+			failures++
+		}
+	}
+	if limited != 2 || failures != 3 {
+		t.Fatalf("аудит: limited=%d failures=%d (entries %+v)", limited, failures, entries)
+	}
+}

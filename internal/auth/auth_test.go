@@ -75,6 +75,40 @@ func TestSessionExpiry(t *testing.T) {
 	}
 }
 
+// Idle-timeout (п. 14, S7г): скользящий — активность продлевает, простой
+// 30 мин при лимите 30 мин завершает сессию.
+func TestSessionIdleTimeout(t *testing.T) {
+	st := NewSessionStore(time.Hour)
+	st.SetIdleTimeout(30 * time.Minute)
+	now := time.Now()
+	st.nowFn = func() time.Time { return now }
+	sess := st.Create("ivan@corp", RoleViewer)
+
+	now = now.Add(20 * time.Minute)
+	if _, ok := st.Get(sess.ID); !ok {
+		t.Fatal("активная сессия (20 мин < idle 30) должна жить")
+	}
+	now = now.Add(31 * time.Minute) // 31 мин от LastSeen (t0+20 после Get)
+	if _, ok := st.Get(sess.ID); ok {
+		t.Fatal("после простоя ≥ idle-timeout сессия недействительна")
+	}
+	if st.Len() != 0 {
+		t.Fatalf("idle-просроченная удаляется лениво: %d", st.Len())
+	}
+}
+
+// По умолчанию idle-timeout равен TTL (оба 12 ч при NewSessionStore(0)).
+func TestSessionIdleDefaultsToTTL(t *testing.T) {
+	st := NewSessionStore(0)
+	now := time.Now()
+	st.nowFn = func() time.Time { return now }
+	sess := st.Create("ivan@corp", RoleViewer)
+	now = now.Add(13 * time.Hour)
+	if _, ok := st.Get(sess.ID); ok {
+		t.Fatal("после 13 ч при default 12 ч сессия недействительна")
+	}
+}
+
 // Субъект в ctx: round-trip.
 func TestSubjectContext(t *testing.T) {
 	ctx := t.Context()

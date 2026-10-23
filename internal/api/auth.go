@@ -5,6 +5,7 @@
 package api
 
 import (
+	"net"
 	"net/http"
 	"strings"
 
@@ -43,11 +44,16 @@ type AuthConfig struct {
 	// пустой или admin_token_fallback=false → отключён.
 	AdminToken string
 	Sessions   *auth.SessionStore // nil → SSO-сессии не принимаются
+	// Limiter — rate-limit неудачных входов (п. 14, brute-force);
+	// nil — без ограничения (тесты, контур без SSO не затрагивается:
+	// middleware отключён вместе с auth.Enabled).
+	Limiter *auth.AttemptLimiter
 }
 
 // withAuth — middleware аутентификации: разрешает субъекта запроса.
 // При выключенном SSO (dev-контур) — пропускает как api.Actor (режим 5б).
 // При включённом: cookie-сессия → Bearer-токен → admin-token; иначе 401.
+// Неудачные попытки учитываются Limiter'ом (п. 14): блокировка — 429.
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	if s.auth == nil || !s.auth.Enabled {
 		return next
@@ -61,8 +67,24 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Rate-limit входа (п. 14): блокировка до проверки учётных данных,
+		// чтобы brute-force не долбил ни хэш-верификатор токена, ни Vault.
+		key := clientKey(r)
+		if s.auth.Limiter != nil {
+			if remaining, blocked := s.auth.Limiter.Blocked(key); blocked {
+				_ = s.auditEvent(r.Context(), audit.CatAuth, "auth_rate_limited", "api", map[string]any{
+					"path": r.URL.Path, "remaining_ms": remaining.Milliseconds(),
+				})
+				writeError(w, http.StatusTooManyRequests, CodeRateLimited,
+					"слишком много неудачных попыток входа — повторите позже", nil)
+				return
+			}
+		}
 		subj, ok := s.resolveSubject(r)
 		if !ok {
+			if s.auth.Limiter != nil {
+				s.auth.Limiter.RecordFail(key)
+			}
 			// Неудача аутентификации — аудируемое событие (п. 14.2 auth;
 			// без actor — субъект не установлен; best effort, не fail-closed,
 			// чтобы отказ отдать клиенту в любом случае).
@@ -73,8 +95,21 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 				"требуется аутентификация (SSO-сессия или API-токен)", nil)
 			return
 		}
+		if s.auth.Limiter != nil {
+			s.auth.Limiter.Reset(key)
+		}
 		next.ServeHTTP(w, r.WithContext(auth.WithSubject(r.Context(), subj)))
 	})
+}
+
+// clientKey — ключ лимитера: IP клиента (RemoteAddr без порта); за
+// reverse-proxy п. 15 рекомендует ограничивать на ближайшем hop'е.
+func clientKey(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // resolveSubject — цепочка разрешения субъекта (п. 11.3, п. 14.2).

@@ -82,12 +82,14 @@ func SubjectFrom(ctx context.Context) (Subject, bool) {
 // Сессии SSO (п. 11.3: в памяти процесса; рестарт разлогинивает всех)
 // ---------------------------------------------------------------------------
 
-// Session — SSO-сессия после успешного SAML-входа.
+// Session — SSO-сессия после успешного SAML-входа. LastSeen — последняя
+// активность (п. 14: idle-timeout сессии, default 12 ч, скользящий).
 type Session struct {
 	ID        string
 	Subject   string // SAML NameID
 	Role      Role
 	ExpiresAt time.Time
+	LastSeen  time.Time
 }
 
 // SessionStore — in-memory хранилище сессий (п. 11.3: single-instance,
@@ -96,24 +98,38 @@ type SessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]Session
 	ttl      time.Duration
+	idle     time.Duration // idle-timeout (п. 14); <= 0 — как ttl
 	nowFn    func() time.Time
 }
 
-// NewSessionStore — ttl сессии (default 12ч; рабочая смена).
+// NewSessionStore — ttl сессии (default 12ч; рабочая смена). Idle-timeout
+// по умолчанию равен ttl (п. 14: default 12 ч); переопределение —
+// SetIdleTimeout.
 func NewSessionStore(ttl time.Duration) *SessionStore {
 	if ttl <= 0 {
 		ttl = 12 * time.Hour
 	}
-	return &SessionStore{sessions: map[string]Session{}, ttl: ttl, nowFn: time.Now}
+	return &SessionStore{sessions: map[string]Session{}, ttl: ttl, idle: ttl, nowFn: time.Now}
+}
+
+// SetIdleTimeout — скользящий idle-timeout сессии (п. 14); d<=0 — как ttl.
+func (s *SessionStore) SetIdleTimeout(d time.Duration) {
+	s.mu.Lock()
+	if d <= 0 {
+		d = s.ttl
+	}
+	s.idle = d
+	s.mu.Unlock()
 }
 
 // Create выдаёт новую сессию субъекту (crypto/rand id, 32 байта hex).
 func (s *SessionStore) Create(subject string, role Role) Session {
 	var b [32]byte
 	_, _ = rand.Read(b[:])
+	now := s.nowFn()
 	sess := Session{
 		ID: hex.EncodeToString(b[:]), Subject: subject, Role: role,
-		ExpiresAt: s.nowFn().Add(s.ttl),
+		ExpiresAt: now.Add(s.ttl), LastSeen: now,
 	}
 	s.mu.Lock()
 	s.sessions[sess.ID] = sess
@@ -121,8 +137,9 @@ func (s *SessionStore) Create(subject string, role Role) Session {
 	return sess
 }
 
-// Get возвращает сессию по id; ok=false — нет или истекла (просроченные
-// удаляются лениво при обращении).
+// Get возвращает сессию по id; ok=false — нет, истекла по абсолютному
+// сроку или по idle-timeout (просроченные удаляются лениво при обращении).
+// Успешное обращение продлевает скользящий idle-timeout (LastSeen=now).
 func (s *SessionStore) Get(id string) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -130,10 +147,17 @@ func (s *SessionStore) Get(id string) (Session, bool) {
 	if !ok {
 		return Session{}, false
 	}
-	if s.nowFn().After(sess.ExpiresAt) {
+	now := s.nowFn()
+	idle := s.idle
+	if idle <= 0 {
+		idle = s.ttl
+	}
+	if now.After(sess.ExpiresAt) || now.Sub(sess.LastSeen) >= idle {
 		delete(s.sessions, id)
 		return Session{}, false
 	}
+	sess.LastSeen = now
+	s.sessions[id] = sess
 	return sess, true
 }
 

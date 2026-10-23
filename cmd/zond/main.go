@@ -573,6 +573,9 @@ func runServe(args []string) int {
 	authCfg := api.AuthConfig{
 		Enabled:  b.Connections.SSO.Enabled,
 		Sessions: sessions,
+		// Rate-limit входа (п. 14, brute-force admin-токена): 5 неудач за
+		// 10 мин → блокировка 15 мин (Defaults, S7г).
+		Limiter: auth.NewAttemptLimiter(auth.LimiterMaxFails, auth.LimiterWindow, auth.LimiterBlockFor),
 	}
 	if b.Connections.SSO.AdminTokenFallback {
 		authCfg.AdminToken = os.Getenv("CLASSIFIER_ADMIN_TOKEN")
