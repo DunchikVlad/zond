@@ -101,7 +101,7 @@ cmd/zond/          scan │ serve │ migrate │ eval │ seed │ agent-check
 │    verdict/store/  SQLite (modernc, goose), единственный писатель       │
 │    llmclient/      тонкий OpenAI-compatible клиент (только из agentproxy)│
 │    auth/           SAML SP (crewjam), сессии, роли                      │
-│    secrets/        Resolver: ENV | Vault kv-v2 | Vault dynamic          │
+│    secrets/        Resolver: Vault kv-v2 | Vault dynamic (ENV — в config)│
 │    audit/          append-only + hash-chain + SIEM-sink                 │
 │    logging/        JSON-логи, correlation id, redact                    │
 │    observe/        agent_calls-учёт, expvar, OTel                       │
@@ -125,7 +125,7 @@ cmd/zond/          scan │ serve │ migrate │ eval │ seed │ agent-check
 |---|---|---|
 | `connector.Connector` (blueprint п. 5.1) | `connector/contract.go` | clickhouse, mongodb, `<db>` |
 | Recognizer (analyze) | `analyze/rules/registry.go` | luhn, iban, inn, snils, … |
-| `secrets.Resolver` (ADR-0012) | `secrets/` | env, vault-kv2, vault-dynamic |
+| `secrets.Resolver` (ADR-0012) | `secrets/` | vault-kv2, vault-dynamic (ENV-режим — интерполяция в config, без resolver) |
 | Store (Verdict Store) | `verdict/store/` (тонкий интерфейс) | sqlite сейчас, postgres v2+ (ADR-0006) |
 | Masker | `agentproxy/mask/` | по типам значений (маск-профиль п. 10.2) |
 | LLM endpoint | — | только через agentproxy (не порт наружу) |
@@ -321,7 +321,7 @@ serve (1 процесс)
 | `internal/scanengine` | FSM скана, воркеры, чекпоинты | Engine, ScanFSM, Checkpoint |
 | `internal/auth` | SAML SP, сессии, роли | SP, SessionStore, RBAC |
 | `internal/api` / `internal/web` | REST, UI | Handlers, Templates |
-| `internal/secrets` | Resolver ENV/Vault | Resolver, LeaseManager |
+| `internal/secrets` | резолвер секретов подключений (ADR-0012, S7в): Vault kv-v2 и dynamic leases (кэш лиз, фоновое продление), аутентификация token/kubernetes | Resolver, Vault, Authenticate, AuditHook |
 | `internal/audit` | hash-chain, sink | Auditor, Chain |
 | `internal/logging` | JSON-лог, correlation id, redact | Logger, Redactor |
 | `internal/observe` | метрики и наблюдаемость (п. 17, S6в): счётчики процесса, expvar, снимки из store, алертинг + webhook | Meter, Snapshot, Evaluator, Webhook |
