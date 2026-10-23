@@ -35,3 +35,24 @@ sso:
   # sp_certificate_file: ./deploy/saml/sp.crt
   # sp_key_file: ./deploy/saml/sp.key
   # cookie_samesite: lax # lax (default) | none (prod за TLS; http-dev + lax: tracked-cookie может не дойти до POST ACS у части браузеров)
+
+# Секреты подключений из HashiCorp Vault (S7в, ADR-0012, blueprint п. 12.1).
+# Выключено — прежний режим ${ENV} (выше). Токен — только из env/JWT,
+# в конфиге запрещён. Демо-контур: deploy/docker-compose.vault.yml +
+# docs/runbooks/vault-demo-contour.md.
+# vault:
+#   enabled: true
+#   address: "https://vault.example.com"
+#   auth:
+#     method: token        # dev/демо: токен из env
+#     token_env: VAULT_TOKEN
+#     # method: kubernetes  # prod: JWT сервис-аккаунта + роль
+#     # role: zond
+#     # jwt_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+#   secrets:
+#     - ref: ch-prod       # совпадает с name источника (source: {name: ch-prod, type: clickhouse, ref: ch-prod})
+#       path: database/creds/ch-prod-readonly   # dynamic: лиза с авто-ротацией
+#       dsn_template: "clickhouse://{{username}}:{{password}}@ch-host:9000/analytics"
+#     - ref: mongo-prod
+#       path: kv/data/zond/mongo-prod           # kv-v2: ключ с готовым URI
+#       key: uri

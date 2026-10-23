@@ -35,6 +35,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/observe"
 	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/scheduler"
+	"github.com/DunchikVlad/zond/internal/secrets"
 	"github.com/DunchikVlad/zond/internal/verdict"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 	"github.com/DunchikVlad/zond/internal/web"
@@ -112,6 +113,61 @@ func runConfig(args []string) int {
 }
 
 // ---------------------------------------------------------------------------
+// secrets (S7в, ADR-0012): резолвер Vault для источников с ref.
+// ---------------------------------------------------------------------------
+
+// auditActorKey — actor аудит-события в контексте (п. 14.2): resolve секрета
+// аудируется от имени инициатора, фоновое продление лиз — actor scheduler.
+type auditActorKey struct{}
+
+// secretsAuditHook — факт resolve/ротации секрета в audit-лог (п. 14.2,
+// CatSecrets, без значений: только ref и path). Ошибка записи — warn:
+// скан не роняем, но факт пропуска виден в логе.
+func secretsAuditHook(st *store.Store, log *slog.Logger) secrets.AuditHook {
+	return func(ctx context.Context, ref, path, action string) {
+		actor, _ := ctx.Value(auditActorKey{}).(string)
+		if action != secrets.ActionResolve {
+			actor = "scheduler" // фоновое продление лиз (blueprint п. 14.2)
+		}
+		if actor == "" {
+			actor = "cli"
+		}
+		if err := st.AppendAudit(ctx, []audit.Event{{
+			Actor: actor, Category: audit.CatSecrets, Action: action,
+			Target: "vault:" + ref, Details: map[string]any{"path": path},
+			TS: time.Now().UTC(),
+		}}); err != nil {
+			log.Warn("аудит секретов: запись не удалась", "ref", ref, "action", action, "error", err)
+		}
+	}
+}
+
+// buildSecretsResolver — резолвер Vault по connections.yaml; выключенный
+// Vault — (nil, nil): прежний режим ${ENV} (п. 12.1).
+func buildSecretsResolver(ctx context.Context, b *config.Bundle, hook secrets.AuditHook) (secrets.Resolver, error) {
+	if !b.Connections.Vault.Enabled {
+		return nil, nil
+	}
+	return secrets.NewFromConfig(ctx, b.Connections.Vault, hook)
+}
+
+// resolveSourceDSN — DSN/URI источника: поля dsn/uri — как есть (ENV
+// интерполированы при загрузке), ref — через резолвер Vault (ADR-0012).
+func resolveSourceDSN(ctx context.Context, src *config.Source, r secrets.Resolver) (string, error) {
+	if src.Ref == "" {
+		dsn := src.DSN
+		if dsn == "" {
+			dsn = src.URI
+		}
+		return dsn, nil
+	}
+	if r == nil {
+		return "", errors.New("vault не настроен (enabled=false), а источник ссылается ref")
+	}
+	return r.Resolve(ctx, src.Ref)
+}
+
+// ---------------------------------------------------------------------------
 // scan (этап 1: слои 0–1; -llm подключает слой 2, инкремент 4в)
 // ---------------------------------------------------------------------------
 
@@ -139,14 +195,33 @@ func runScan(args []string) int {
 		fmt.Fprintf(os.Stderr, "scan: %v\n", err)
 		return 2
 	}
+	// Store до подключения: resolve секрета (ref) аудируется в hash-chain
+	// (п. 14.2), actor cli.
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scan: verdict store: %v\n", err)
+		return 2
+	}
+	defer st.Close()
+	log := logging.New(os.Stderr, "info")
+	resolver, err := buildSecretsResolver(context.Background(), b, secretsAuditHook(st, log))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scan: vault: %v\n", err)
+		return 2
+	}
+	if resolver != nil {
+		defer resolver.Close()
+	}
 	factory, ok := connector.Lookup(src.Type)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "scan: коннектор %q не зарегистрирован (доступно: %v)\n", src.Type, connector.Types())
 		return 2
 	}
-	dsn := src.DSN
-	if dsn == "" {
-		dsn = src.URI
+	ctx := context.WithValue(context.Background(), auditActorKey{}, "cli")
+	dsn, err := resolveSourceDSN(ctx, src, resolver)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scan: подключение: %v\n", err)
+		return 2
 	}
 	conn, err := factory(dsn)
 	if err != nil {
@@ -154,13 +229,6 @@ func runScan(args []string) int {
 		return 2
 	}
 	defer conn.Close()
-
-	st, err := store.Open(*dbPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "scan: verdict store: %v\n", err)
-		return 2
-	}
-	defer st.Close()
 
 	prof := *profile
 	if prof == "" {
@@ -323,19 +391,20 @@ func taxonomyLabels(t *config.Taxonomy) []string {
 // мягкой остановкой через ctx (п. 11.2). Resource governance этапа 5:
 // один активный прогон на источник (п. 13.2; per-source caps).
 type engineRunner struct {
-	b      *config.Bundle
-	st     *store.Store
-	log    *slog.Logger
-	useLLM bool
+	b        *config.Bundle
+	st       *store.Store
+	log      *slog.Logger
+	useLLM   bool
+	resolver secrets.Resolver // ref-источников (Vault, ADR-0012); nil — режим ENV
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc // scan_id → cancel
 	sources map[string]bool               // источник занят активным прогоном
 }
 
-func newEngineRunner(b *config.Bundle, st *store.Store, log *slog.Logger, useLLM bool) *engineRunner {
+func newEngineRunner(b *config.Bundle, st *store.Store, log *slog.Logger, useLLM bool, resolver secrets.Resolver) *engineRunner {
 	return &engineRunner{
-		b: b, st: st, log: log, useLLM: useLLM,
+		b: b, st: st, log: log, useLLM: useLLM, resolver: resolver,
 		running: map[string]context.CancelFunc{}, sources: map[string]bool{},
 	}
 }
@@ -356,9 +425,15 @@ func (r *engineRunner) Start(source, profile, actor string) (string, error) {
 	if !ok {
 		return "", &api.BadScanRequestError{Reason: fmt.Sprintf("коннектор %q не зарегистрирован", src.Type)}
 	}
-	dsn := src.DSN
-	if dsn == "" {
-		dsn = src.URI
+	// Resolve ref (Vault) от имени инициатора: факт — в аудит (п. 14.2).
+	dsnCtx := context.WithValue(context.Background(), auditActorKey{}, actor)
+	dsn, err := resolveSourceDSN(dsnCtx, src, r.resolver)
+	if err != nil {
+		reason := fmt.Sprintf("источник %q: %v", source, err)
+		if errors.Is(err, secrets.ErrUnavailable) {
+			reason = fmt.Sprintf("источник %q: vault_unavailable: %v", source, err)
+		}
+		return "", &api.SourceUnavailableError{Reason: reason}
 	}
 	conn, err := factory(dsn)
 	if err != nil {
@@ -478,7 +553,19 @@ func runServe(args []string) int {
 	}
 	defer st.Close()
 
-	runner := newEngineRunner(b, st, log, *useLLM)
+	// Секреты подключений (S7в, ADR-0012): resolver для ref-источников,
+	// аудит resolve/ротации — в hash-chain (actor из контекста/scheduler).
+	resolver, err := buildSecretsResolver(context.Background(), b, secretsAuditHook(st, log))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "serve: vault: %v\n", err)
+		return 2
+	}
+	if resolver != nil {
+		defer resolver.Close()
+		log.Info("serve: секреты подключений — Vault", "address", b.Connections.Vault.Address,
+			"refs", len(b.Connections.Vault.Secrets))
+	}
+	runner := newEngineRunner(b, st, log, *useLLM, resolver)
 	// Аутентификация (инкремент 5в, п. 11.3/п. 14.2): включается sso.enabled
 	// в connections.yaml; admin-token fallback — env CLASSIFIER_ADMIN_TOKEN
 	// при admin_token_fallback=true (bootstrap/аварийный доступ).

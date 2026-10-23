@@ -11,6 +11,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
+	"iter"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +23,7 @@ import (
 	"time"
 
 	"github.com/DunchikVlad/zond/internal/config"
+	"github.com/DunchikVlad/zond/internal/connector"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 )
 
@@ -243,5 +246,138 @@ func TestReportTextAndCounts(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("отчёт без %q:\n%s", want, out)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// S7в: Vault (ADR-0012) — реальные проверки doctor против httptest-стенда.
+// ---------------------------------------------------------------------------
+
+// fakeVaultServer — минимальный стенд Vault: kv-v2 по известному пути,
+// иначе 404 (нет секрета/доступа).
+func fakeVaultServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/kv/data/zond/mongo-prod", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"data":{"uri":"mongodb://u:p@127.0.0.1:27017/db"}}}`)
+	})
+	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+		fmt.Fprint(w, `{"errors":["unknown path"]}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// vaultBundle — конфиг с источником на ref и включённым Vault.
+func vaultBundle(t *testing.T, addr, ref string) *config.Bundle {
+	t.Helper()
+	b := testBundle(t, "http://localhost:9/v1")
+	b.Detectors.Agents = nil
+	b.Connections.Sources = []config.Source{{Name: "mongo-prod", Type: "vaulttest", Ref: ref}}
+	b.Connections.Vault = config.Vault{
+		Enabled: true,
+		Address: addr,
+		Auth:    config.VaultAuth{Method: "token", TokenEnv: "DOCTOR_VAULT_TOKEN"},
+		Secrets: []config.VaultSecret{
+			{Ref: "mongo-prod", Path: "kv/data/zond/mongo-prod", Key: "uri"},
+			{Ref: "ch-prod", Path: "database/creds/ch-prod-readonly", DSNTemplate: "clickhouse://{{username}}:{{password}}@ch:9000/db"},
+		},
+	}
+	return b
+}
+
+// stubConnector — коннектор-заглушка для проверок doctor (без сети):
+// конструктор принимает любой DSN, Ping всегда ок.
+type stubConnector struct{ dsn string }
+
+func (c *stubConnector) Ping(ctx context.Context) error { return nil }
+func (c *stubConnector) ListTables(ctx context.Context) ([]connector.TableRef, error) {
+	return nil, nil
+}
+func (c *stubConnector) GetSchema(ctx context.Context, t connector.TableRef) ([]connector.Column, error) {
+	return nil, nil
+}
+func (c *stubConnector) CountRows(ctx context.Context, t connector.TableRef) (int64, error) {
+	return 0, nil
+}
+func (c *stubConnector) Sample(ctx context.Context, spec connector.SampleSpec) (iter.Seq2[connector.Row, error], error) {
+	return func(yield func(connector.Row, error) bool) {}, nil
+}
+func (c *stubConnector) Close() error { return nil }
+
+func init() {
+	_ = connector.Register("vaulttest", func(dsn string) (connector.Connector, error) {
+		return &stubConnector{dsn: dsn}, nil
+	})
+}
+
+// TestRunVaultOnlineOK — vault: OK (аутентификация), vault.read: OK для
+// читаемого секрета и FAIL для отсутствующего пути; источник с ref открыт
+// по секрету (конструктор без сети), ping без БД — FAIL.
+func TestRunVaultOnlineOK(t *testing.T) {
+	srv := fakeVaultServer(t)
+	t.Setenv("DOCTOR_VAULT_TOKEN", "doctor-token")
+	rep := Run(context.Background(), vaultBundle(t, srv.URL, "mongo-prod"),
+		filepath.Join(t.TempDir(), "doc.db"), Options{Online: true, Now: time.Now()})
+
+	if got := resultByCode(rep, "vault"); len(got) != 1 || got[0].Status != StatusOK {
+		t.Fatalf("vault: %+v", got)
+	}
+	reads := resultByCode(rep, "vault.read")
+	if len(reads) != 2 {
+		t.Fatalf("vault.read: %+v", reads)
+	}
+	bySubj := map[string]Status{}
+	for _, r := range reads {
+		bySubj[r.Subject] = r.Status
+	}
+	if bySubj["mongo-prod"] != StatusOK || bySubj["ch-prod"] != StatusFail {
+		t.Errorf("vault.read: %+v", bySubj)
+	}
+	opens := resultByCode(rep, "source.open")
+	if len(opens) != 0 {
+		t.Errorf("source.open без ошибок не должен появляться: %+v", opens)
+	}
+	if got := resultByCode(rep, "source.ping"); len(got) != 1 || got[0].Status != StatusOK {
+		t.Errorf("source.ping после резолва ref: %+v", got)
+	}
+}
+
+// TestRunVaultAuthFail — env с токеном не задан: vault FAIL, источник с
+// ref — FAIL со ссылкой на проверку vault.
+func TestRunVaultAuthFail(t *testing.T) {
+	srv := fakeVaultServer(t)
+	rep := Run(context.Background(), vaultBundle(t, srv.URL, "mongo-prod"),
+		filepath.Join(t.TempDir(), "doc.db"), Options{Online: true, Now: time.Now()})
+
+	if got := resultByCode(rep, "vault"); len(got) != 1 || got[0].Status != StatusFail {
+		t.Fatalf("vault: %+v", got)
+	}
+	if got := resultByCode(rep, "vault.read"); len(got) != 0 {
+		t.Errorf("vault.read без resolver: %+v", got)
+	}
+	opens := resultByCode(rep, "source.open")
+	if len(opens) != 1 || opens[0].Status != StatusFail {
+		t.Errorf("source.open без resolver: %+v", opens)
+	}
+}
+
+// TestRunVaultOffline — включённый Vault без -online: vault SKIP,
+// источник с ref — SKIP (резолв требует сети).
+func TestRunVaultOffline(t *testing.T) {
+	srv := fakeVaultServer(t)
+	t.Setenv("DOCTOR_VAULT_TOKEN", "doctor-token")
+	rep := Run(context.Background(), vaultBundle(t, srv.URL, "mongo-prod"),
+		filepath.Join(t.TempDir(), "doc.db"), Options{})
+
+	if got := resultByCode(rep, "vault"); len(got) != 1 || got[0].Status != StatusSkip {
+		t.Fatalf("vault offline: %+v", got)
+	}
+	opens := resultByCode(rep, "source.open")
+	if len(opens) != 1 || opens[0].Status != StatusSkip {
+		t.Errorf("source.open offline с ref: %+v", opens)
 	}
 }

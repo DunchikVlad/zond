@@ -1,0 +1,17 @@
+# Dev/demo HashiCorp Vault для zond (ADR-0012): dev-сервер в памяти.
+# ТОЛЬКО для локальной демонстрации/проверки — не для прода: dev-режим
+# (root token из env, без TLS, без seal, без аудита Vault).
+# Подъём: docker compose -f deploy/docker-compose.vault.yml up -d
+# Заполнение секретов и связка с zond: docs/runbooks/vault-demo-contour.md
+
+services:
+  vault:
+    image: hashicorp/vault:1.19.5
+    container_name: zond-vault
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_DEV_ROOT_TOKEN_ID:-zond-dev-root-token}
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK # mlock для не-swappable памяти (требование Vault)
+    ports:
+      - "127.0.0.1:8200:8200" # loopback: dev-контур без TLS

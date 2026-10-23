@@ -22,6 +22,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/agentproxy"
 	"github.com/DunchikVlad/zond/internal/config"
 	"github.com/DunchikVlad/zond/internal/connector"
+	"github.com/DunchikVlad/zond/internal/secrets"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 )
 
@@ -117,11 +118,64 @@ func Run(ctx context.Context, b *config.Bundle, dbPath string, opts Options) *Re
 		rep.add("config.load", "configs", StatusFail, "конфигурация не загружена — зависимые проверки пропущены")
 		return rep
 	}
-	checkSources(ctx, rep, b, opts.Online)
+	vaultResolver := checkVault(ctx, rep, b, opts.Online)
+	if vaultResolver != nil {
+		defer vaultResolver.Close() // остановка renewer'ов лиз после прогона
+	}
+	checkSources(ctx, rep, b, opts.Online, vaultResolver)
 	checkAgents(ctx, rep, b, opts)
 	checkTLSCerts(rep, b, now)
-	rep.add("vault", "secrets", StatusSkip, "Vault не реализован (S7в, ADR-0012) — секреты через ENV")
+	checkVaultReads(ctx, rep, b, vaultResolver)
 	return rep
+}
+
+// checkVault — резолвер секретов Vault для doctor (S7в, ADR-0012): выключен —
+// SKIP; без -online — SKIP; online — аутентификация и resolver для проверок
+// источников с ref. Аудит не пишем: doctor — read-only preflight (п. 15.3).
+func checkVault(ctx context.Context, rep *Report, b *config.Bundle, online bool) secrets.Resolver {
+	v := b.Connections.Vault
+	if !v.Enabled {
+		rep.add("vault", "secrets", StatusSkip, "Vault выключен — секреты через ENV (п. 12.1)")
+		return nil
+	}
+	if !online {
+		rep.add("vault", "secrets", StatusSkip, "пропущено (doctor без -online)")
+		return nil
+	}
+	r, err := secrets.NewFromConfig(ctx, v, nil)
+	if err != nil {
+		rep.add("vault", v.Address, StatusFail, err.Error())
+		return nil
+	}
+	detail := fmt.Sprintf("аутентификация method=%s", v.Auth.Method)
+	if v.Auth.Method == "kubernetes" {
+		detail += fmt.Sprintf(" (роль %s)", v.Auth.Role)
+	}
+	rep.add("vault", v.Address, StatusOK, detail)
+	return r
+}
+
+// checkVaultReads — каждая запись vault.secrets читается реально (п. 15.3):
+// доступность Vault + политика + корректность path/key/template.
+func checkVaultReads(ctx context.Context, rep *Report, b *config.Bundle, r secrets.Resolver) {
+	v := b.Connections.Vault
+	if !v.Enabled || r == nil {
+		return
+	}
+	for _, s := range v.Secrets {
+		kind := "kv-v2"
+		if s.DSNTemplate != "" {
+			kind = "dynamic lease"
+		}
+		readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, err := r.Resolve(readCtx, s.Ref)
+		cancel()
+		if err != nil {
+			rep.add("vault.read", s.Ref, StatusFail, err.Error())
+			continue
+		}
+		rep.add("vault.read", s.Ref, StatusOK, fmt.Sprintf("секрет читается (%s)", kind))
+	}
 }
 
 // checkDisk — свободное место на томе БД ≥ 2× размера файла (п. 15.3).
@@ -169,8 +223,10 @@ func checkStore(rep *Report, dbPath string) {
 }
 
 // checkSources — доступность каждого источника: конструктор + Ping +
-// probe (ListTables) под readonly-учёткой (п. 15.3).
-func checkSources(ctx context.Context, rep *Report, b *config.Bundle, online bool) {
+// probe (ListTables) под readonly-учёткой (п. 15.3). Источники с ref
+// (Vault, ADR-0012) резолвятся через resolver: offline — SKIP, сбой
+// резолва — FAIL (vault_unavailable).
+func checkSources(ctx context.Context, rep *Report, b *config.Bundle, online bool, resolver secrets.Resolver) {
 	names := make([]string, 0, len(b.Connections.Sources))
 	byName := map[string]config.Source{}
 	for _, src := range b.Connections.Sources {
@@ -189,6 +245,24 @@ func checkSources(ctx context.Context, rep *Report, b *config.Bundle, online boo
 		dsn := src.DSN
 		if dsn == "" {
 			dsn = src.URI
+		}
+		if src.Ref != "" {
+			if !online {
+				rep.add("source.open", name, StatusSkip, "ref: резолв Vault требует сети (пропущено, doctor без -online)")
+				continue
+			}
+			if resolver == nil {
+				rep.add("source.open", name, StatusFail, "ref: резолвер Vault недоступен (см. проверку vault)")
+				continue
+			}
+			resolveCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			resolved, err := resolver.Resolve(resolveCtx, src.Ref)
+			cancel()
+			if err != nil {
+				rep.add("source.open", name, StatusFail, "vault: "+err.Error())
+				continue
+			}
+			dsn = resolved
 		}
 		conn, err := factory(dsn)
 		if err != nil {
