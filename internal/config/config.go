@@ -121,6 +121,40 @@ type Connections struct {
 	// `zond backup`. Валидация выражения — задача шедулера (прецедент
 	// source.schedule: warn-лог + аудит, старт не падает).
 	Backup Backup `yaml:"backup"`
+	// Vault — секреты подключений из HashiCorp Vault (ADR-0012, п. 12.1).
+	// Выключен или блок отсутствует — прежний режим ${ENV}.
+	Vault Vault `yaml:"vault"`
+}
+
+// Vault — опциональный блок secrets.Resolver (ADR-0012): address, способ
+// аутентификации и записи secrets (ref → path). Секретов в файле нет:
+// токен — в env (token_env) или JWT сервис-аккаунта (kubernetes).
+type Vault struct {
+	Enabled bool          `yaml:"enabled"`
+	Address string        `yaml:"address"`
+	Auth    VaultAuth     `yaml:"auth"`
+	Secrets []VaultSecret `yaml:"secrets"`
+}
+
+// VaultAuth — аутентификация в Vault: method token (токен из env, dev/демо)
+// или kubernetes (JWT сервис-аккаунта + роль, prod). Токен в конфиге
+// запрещён (п. 12.1) — строгий парсинг отвергнет лишний ключ.
+type VaultAuth struct {
+	Method   string `yaml:"method"`    // token | kubernetes
+	TokenEnv string `yaml:"token_env"` // method=token: имя env-переменной с токеном
+	Role     string `yaml:"role"`      // method=kubernetes: роль Vault
+	JWTFile  string `yaml:"jwt_file"`  // method=kubernetes: путь к JWT (по умолчанию стандартный путь SA)
+}
+
+// VaultSecret — запись vault.secrets: ref совпадает с name источника.
+// Ровно один режим чтения: key (kv-v2, значение ключа — готовый DSN/URI)
+// или dsn_template (dynamic database/creds, подстановка {{username}}/
+// {{password}} в шаблон DSN).
+type VaultSecret struct {
+	Ref         string `yaml:"ref"`
+	Path        string `yaml:"path"`
+	Key         string `yaml:"key"`
+	DSNTemplate string `yaml:"dsn_template"`
 }
 
 // Backup — расписание и каталог онлайн-копий (п. 15.2; VACUUM INTO).
@@ -133,8 +167,11 @@ type Backup struct {
 type Source struct {
 	Name string `yaml:"name"`
 	Type string `yaml:"type"` // clickhouse | mongodb | <db> по конвенции путей
-	DSN  string `yaml:"dsn"`  // либо DSN, либо URI — ровно один источник адреса
+	DSN  string `yaml:"dsn"`  // DSN | URI | ref (Vault) — ровно один источник адреса
 	URI  string `yaml:"uri"`
+	// Ref — имя записи vault.secrets (ADR-0012): секрет читается резолвером
+	// в момент установки коннекта, в конфиге секрета нет (п. 12.1).
+	Ref string `yaml:"ref"`
 	// Schedule — cron-выражение периодического перескана (blueprint п. 15:
 	// расписание в конфиге источника). Пусто — только ручной запуск.
 	// Валидация выражения — задача шедулера (при ошибке: warn-лог + аудит,
@@ -181,8 +218,35 @@ func (c *Connections) Validate() error {
 		if s.Type == "" {
 			errs = append(errs, fmt.Errorf("sources[%d] (%s): type обязателен", i, s.Name))
 		}
-		if (s.DSN == "") == (s.URI == "") {
-			errs = append(errs, fmt.Errorf("sources[%d] (%s): ровно одно из полей dsn/uri обязательно", i, s.Name))
+		n := 0
+		for _, addr := range []string{s.DSN, s.URI, s.Ref} {
+			if addr != "" {
+				n++
+			}
+		}
+		if n != 1 {
+			errs = append(errs, fmt.Errorf("sources[%d] (%s): ровно одно из полей dsn/uri/ref обязательно", i, s.Name))
+		}
+		if s.Ref != "" && !c.Vault.Enabled {
+			errs = append(errs, fmt.Errorf("sources[%d] (%s): ref требует vault.enabled=true (ADR-0012)", i, s.Name))
+		}
+	}
+	if err := c.Vault.validate(seen); err != nil {
+		errs = append(errs, err)
+	}
+	for _, s := range c.Sources {
+		if s.Ref == "" || !c.Vault.Enabled {
+			continue
+		}
+		found := false
+		for _, vs := range c.Vault.Secrets {
+			if vs.Ref == s.Ref {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errs = append(errs, fmt.Errorf("sources (%s): ref %q не найден в vault.secrets", s.Name, s.Ref))
 		}
 	}
 	if c.SSO.Enabled {
@@ -203,6 +267,62 @@ func (c *Connections) Validate() error {
 	}
 	if c.Backup.Schedule != "" && c.Backup.Dir == "" {
 		errs = append(errs, errors.New("backup: dir обязателен при заданном schedule (п. 15.2)"))
+	}
+	return errors.Join(errs...)
+}
+
+// validate — fail-fast проверка блока vault (ADR-0012, п. 12.1).
+// sourceNames — имена источников (ref записи совпадает с name источника).
+func (v *Vault) validate(sourceNames map[string]bool) error {
+	configured := v.Address != "" || v.Auth.Method != "" || len(v.Secrets) > 0
+	if !v.Enabled {
+		if configured {
+			return errors.New("vault: блок настроен, но enabled=false (либо включите, либо уберите)")
+		}
+		return nil
+	}
+	var errs []error
+	if v.Address == "" {
+		errs = append(errs, errors.New("vault: address обязателен при enabled=true"))
+	}
+	switch v.Auth.Method {
+	case "token":
+		if v.Auth.TokenEnv == "" {
+			errs = append(errs, errors.New("vault: auth.token_env обязателен при method=token (п. 12.1: токен в конфиге запрещён)"))
+		}
+	case "kubernetes":
+		if v.Auth.Role == "" {
+			errs = append(errs, errors.New("vault: auth.role обязателен при method=kubernetes"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("vault: auth.method допустимы token|kubernetes, получено %q", v.Auth.Method))
+	}
+	seenRef := make(map[string]bool, len(v.Secrets))
+	for i, s := range v.Secrets {
+		if s.Ref == "" {
+			errs = append(errs, fmt.Errorf("vault.secrets[%d]: ref обязателен (совпадает с name источника)", i))
+		} else if seenRef[s.Ref] {
+			errs = append(errs, fmt.Errorf("vault.secrets[%d]: дубль ref %q", i, s.Ref))
+		}
+		seenRef[s.Ref] = true
+		if s.Path == "" {
+			errs = append(errs, fmt.Errorf("vault.secrets[%d] (%s): path обязателен", i, s.Ref))
+		}
+		switch {
+		case s.Key == "" && s.DSNTemplate == "":
+			errs = append(errs, fmt.Errorf("vault.secrets[%d] (%s): одно из key (kv-v2) | dsn_template (dynamic) обязательно", i, s.Ref))
+		case s.Key != "" && s.DSNTemplate != "":
+			errs = append(errs, fmt.Errorf("vault.secrets[%d] (%s): key и dsn_template взаимоисключающи", i, s.Ref))
+		case s.DSNTemplate != "":
+			for _, ph := range []string{"{{username}}", "{{password}}"} {
+				if !strings.Contains(s.DSNTemplate, ph) {
+					errs = append(errs, fmt.Errorf("vault.secrets[%d] (%s): dsn_template должен содержать %s", i, s.Ref, ph))
+				}
+			}
+		}
+		if s.Ref != "" && !sourceNames[s.Ref] {
+			errs = append(errs, fmt.Errorf("vault.secrets[%d] (%s): ref не совпадает ни с одним источником", i, s.Ref))
+		}
 	}
 	return errors.Join(errs...)
 }

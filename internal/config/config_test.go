@@ -252,3 +252,174 @@ backup: {schedule: "0 3 * * *", dir: "/var/backups/zond"}
 		t.Fatalf("корректный backup отклонён: %v", err)
 	}
 }
+
+// TestConnectionsVaultValid — источник с ref + корректный блок vault
+// (ADR-0012): kv-v2 (key) и dynamic (dsn_template с обоими плейсхолдерами).
+func TestConnectionsVaultValid(t *testing.T) {
+	setValidEnv(t)
+	dir := validDir(t)
+	writeFile(t, dir, "connections.yaml", `
+version: "1"
+sources:
+  - {name: ch-prod, type: clickhouse, ref: ch-prod}
+  - {name: mongo-prod, type: mongodb, ref: mongo-prod}
+vault:
+  enabled: true
+  address: "https://vault.example.com"
+  auth: {method: token, token_env: VAULT_TOKEN}
+  secrets:
+    - {ref: ch-prod, path: database/creds/ch-prod-readonly, dsn_template: "clickhouse://{{username}}:{{password}}@ch:9000/db"}
+    - {ref: mongo-prod, path: kv/data/zond/mongo-prod, key: uri}
+`)
+	c, err := LoadConnections(filepath.Join(dir, "connections.yaml"))
+	if err != nil {
+		t.Fatalf("валидный vault-конфиг отклонён: %v", err)
+	}
+	if c.Sources[0].Ref != "ch-prod" || c.Vault.Secrets[0].DSNTemplate == "" {
+		t.Fatalf("ref/dsn_template не распарсены: %+v", c)
+	}
+}
+
+// TestConnectionsVaultInvalid — таблица некорректных vault-конфигов
+// (fail-fast, п. 12.1): каждый случай — отдельная правка валидного блока.
+func TestConnectionsVaultInvalid(t *testing.T) {
+	valid := `
+version: "1"
+sources:
+  - {name: ch-prod, type: clickhouse, ref: ch-prod}
+vault:
+  enabled: true
+  address: "https://vault.example.com"
+  auth: {method: token, token_env: VAULT_TOKEN}
+  secrets:
+    - {ref: ch-prod, path: database/creds/ch-prod-readonly, dsn_template: "clickhouse://{{username}}:{{password}}@ch:9000/db"}
+`
+	cases := map[string]string{
+		"ref без vault.enabled": `
+version: "1"
+sources:
+  - {name: ch-prod, type: clickhouse, ref: ch-prod}
+`,
+		"блок настроен, но enabled=false": valid + "\n" + `vault:
+  enabled: false
+  address: "https://vault.example.com"
+  auth: {method: token, token_env: VAULT_TOKEN}
+  secrets:
+    - {ref: ch-prod, path: p, key: uri}
+`,
+		"нет address": `
+version: "1"
+sources:
+  - {name: ch-prod, type: clickhouse, ref: ch-prod}
+vault:
+  enabled: true
+  auth: {method: token, token_env: VAULT_TOKEN}
+  secrets:
+    - {ref: ch-prod, path: p, key: uri}
+`,
+		"method token без token_env": `
+version: "1"
+sources:
+  - {name: ch-prod, type: clickhouse, ref: ch-prod}
+vault:
+  enabled: true
+  address: "https://vault.example.com"
+  auth: {method: token}
+  secrets:
+    - {ref: ch-prod, path: p, key: uri}
+`,
+		"неизвестный auth.method": `
+version: "1"
+sources:
+  - {name: ch-prod, type: clickhouse, ref: ch-prod}
+vault:
+  enabled: true
+  address: "https://vault.example.com"
+  auth: {method: ldap}
+  secrets:
+    - {ref: ch-prod, path: p, key: uri}
+`,
+		"источник указывает на несуществующую запись secrets": `
+version: "1"
+sources:
+  - {name: ch-prod, type: clickhouse, ref: ch-prod}
+vault:
+  enabled: true
+  address: "https://vault.example.com"
+  auth: {method: token, token_env: VAULT_TOKEN}
+  secrets:
+    - {ref: other, path: p, key: uri}
+`,
+		"запись secrets без источника": valid + "\n" + `vault:
+  enabled: true
+  address: "https://vault.example.com"
+  auth: {method: token, token_env: VAULT_TOKEN}
+  secrets:
+    - {ref: ghost, path: p, key: uri}
+`,
+		"key и dsn_template вместе": `
+version: "1"
+sources:
+  - {name: ch-prod, type: clickhouse, ref: ch-prod}
+vault:
+  enabled: true
+  address: "https://vault.example.com"
+  auth: {method: token, token_env: VAULT_TOKEN}
+  secrets:
+    - {ref: ch-prod, path: p, key: uri, dsn_template: "clickhouse://{{username}}:{{password}}@ch/db"}
+`,
+		"dsn_template без плейсхолдеров": `
+version: "1"
+sources:
+  - {name: ch-prod, type: clickhouse, ref: ch-prod}
+vault:
+  enabled: true
+  address: "https://vault.example.com"
+  auth: {method: token, token_env: VAULT_TOKEN}
+  secrets:
+    - {ref: ch-prod, path: p, dsn_template: "clickhouse://ch:9000/db"}
+`,
+		"запись без key и без dsn_template": `
+version: "1"
+sources:
+  - {name: ch-prod, type: clickhouse, ref: ch-prod}
+vault:
+  enabled: true
+  address: "https://vault.example.com"
+  auth: {method: token, token_env: VAULT_TOKEN}
+  secrets:
+    - {ref: ch-prod, path: p}
+`,
+	}
+	for name, cfg := range cases {
+		t.Run(name, func(t *testing.T) {
+			setValidEnv(t)
+			dir := validDir(t)
+			writeFile(t, dir, "connections.yaml", cfg)
+			if _, err := LoadConnections(filepath.Join(dir, "connections.yaml")); err == nil {
+				t.Fatalf("кейс %q: конфиг должен отклоняться", name)
+			}
+		})
+	}
+}
+
+// TestConnectionsVaultTokenInConfigRejected — токен в конфиге отвергается
+// строгим парсером (п. 12.1: токен — только env/JWT).
+func TestConnectionsVaultTokenInConfigRejected(t *testing.T) {
+	setValidEnv(t)
+	dir := validDir(t)
+	writeFile(t, dir, "connections.yaml", `
+version: "1"
+sources:
+  - {name: ch-prod, type: clickhouse, ref: ch-prod}
+vault:
+  enabled: true
+  address: "https://vault.example.com"
+  auth: {method: token, token: "secret-in-config"}
+  secrets:
+    - {ref: ch-prod, path: p, key: uri}
+`)
+	if _, err := LoadConnections(filepath.Join(dir, "connections.yaml")); err == nil {
+		t.Fatal("auth.token в конфиге должен отклоняться строгой схемой")
+	}
+}
