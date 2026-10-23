@@ -38,5 +38,42 @@ ci: fmt vet build test ## Локальный прогон CI-ворот
 eval: ## Отчёт F1 и $/1000 колонок по датасету (evals/reports/report.json)
 	go run ./cmd/eval run
 
+# ---------------------------------------------------------------------------
+# Релиз (S7г, blueprint п. 15/18): кросс-сборка, checksums, SBOM (syft),
+# подпись (cosign, keyless). dist/ — не коммитится (.gitignore).
+# ---------------------------------------------------------------------------
+DIST      := dist
+PLATFORMS := linux/amd64 linux/arm64 windows/amd64
+
+.PHONY: dist checksums sbom sign release
+dist: ## Кросс-сборка релизных бинарей (п. 18: linux/amd64, linux/arm64, windows/amd64)
+	@mkdir -p $(DIST)
+	@for p in $(PLATFORMS); do \
+	  goos=$$(echo $$p | cut -d/ -f1); goarch=$$(echo $$p | cut -d/ -f2); \
+	  out=$(DIST)/zond-$(VERSION)-$$goos-$$goarch; \
+	  if [ "$$goos" = windows ]; then out=$$out.exe; fi; \
+	  echo "build $$goos/$$goarch -> $$out"; \
+	  GOOS=$$goos GOARCH=$$goarch CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o $$out ./cmd/zond; \
+	done
+
+checksums: dist ## SHA256SUMS.txt по артефактам dist (п. 15, релизный чеклист)
+	cd $(DIST) && sha256sum zond-* > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+sbom: ## SBOM (syft, SPDX-JSON) - requires syft in PATH; in CI see release.yml
+	@if command -v syft >/dev/null 2>&1; then \
+	  syft dir:. -o spdx-json=$(DIST)/zond-$(VERSION)-sbom.spdx.json; \
+	else \
+	  echo "syft not found - skipping SBOM (CI: anchore/sbom-action)"; \
+	fi
+
+sign: checksums ## cosign (keyless) signature - requires cosign in PATH
+	@if command -v cosign >/dev/null 2>&1; then \
+	  cd $(DIST) && cosign sign-blob --yes --output-signature zond.sig zond-* SHA256SUMS.txt; \
+	else \
+	  echo "cosign not found - skipping signature (CI: sigstore/cosign-installer)"; \
+	fi
+
+release: checksums sbom sign ## Полный релизный набор (п. 15: бинари + checksums + SBOM + подпись)
+
 clean:
-	rm -rf bin coverage.out coverage.html
+	rm -rf bin $(DIST) coverage.out coverage.html

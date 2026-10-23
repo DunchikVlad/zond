@@ -1,0 +1,88 @@
+# Релизный pipeline (blueprint п. 15 «Харденинг контейнера», п. 16.7):
+# тег v* → кросс-сборка (linux/amd64, linux/arm64, windows/amd64) →
+# SHA256SUMS.txt → SBOM (syft, SPDX-JSON) → подпись cosign (keyless, OIDC) →
+# GitHub Release со всеми артефактами. Три обязательных артефакта п. 15:
+# checksums, SBOM, подпись.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # публикация GitHub Release
+  id-token: write # cosign keyless (OIDC)
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          - {goos: windows, goarch: amd64}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Build (static, -trimpath)
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          out="dist/zond-${{ github.ref_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = windows ]; then out="$out.exe"; fi
+          go build -trimpath \
+            -ldflags "-X main.Version=${{ github.ref_name }} -X main.Commit=$(git rev-parse --short HEAD)" \
+            -o "$out" ./cmd/zond
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zond-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: checksums + SBOM + sign + publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: zond-*
+          path: dist/
+          merge-multiple: true
+
+      - name: SHA256SUMS (п. 15)
+        run: cd dist && sha256sum zond-* | tee SHA256SUMS.txt
+
+      - name: SBOM (syft, SPDX-JSON; п. 15/16.7)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/zond-${{ github.ref_name }}-sbom.spdx.json
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Подпись артефактов (cosign keyless; п. 15)
+        run: |
+          cd dist
+          for f in zond-* SHA256SUMS.txt; do
+            cosign sign-blob --yes --output-signature "$f.sig" --output-certificate "$f.pem" "$f"
+          done
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

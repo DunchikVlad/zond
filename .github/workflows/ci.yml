@@ -35,3 +35,14 @@ jobs:
 
       - name: Lint
         uses: golangci/golangci-lint-action@v7
+
+      # П. 16.7: govulncheck без находок High/Critical (блокирует).
+      # Прогон через go run — бинарик не нужен; версия БД уязвимостей — свежая.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      # П. 16.7: бан GPL/Commons Clause в зависимостях. Игноры: собственный
+      # модуль (в репозитории нет LICENSE-файла) и субпакеты segmentio/asm
+      # (лицензия MIT на корне модуля; go-licenses не находит файл в подпакетах).
+      - name: Licenses (бан GPL/Commons Clause)
+        run: go run github.com/google/go-licenses/v2@latest check --ignore github.com/DunchikVlad/zond --ignore github.com/segmentio/asm ./...
