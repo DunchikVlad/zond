@@ -75,5 +75,17 @@ sign: checksums ## cosign (keyless) signature - requires cosign in PATH
 
 release: checksums sbom sign ## Полный релизный набор (п. 15: бинари + checksums + SBOM + подпись)
 
+# Эталонный контур (blueprint п. 15, DoD п. 22): compose app+ClickHouse+
+# MongoDB+seed, разовый quick-скан до первых вердиктов (зелёный smoke =
+# код 0 и вердикты в UI на 127.0.0.1:8080). Требует docker.
+smoke: ## Подъём smoke-контура и quick-скан до вердиктов (≤15 мин с нуля)
+	docker compose -f deploy/docker-compose.yml --profile smoke run --rm --build smoke-scan
+	@echo "smoke: скан завершён (код 0) — вердикты в UI:"
+	docker compose -f deploy/docker-compose.yml up -d app
+	@echo "  http://127.0.0.1:8080  (остановка и очистка: make smoke-clean)"
+
+smoke-clean: ## Остановка и очистка smoke-контура (тома)
+	docker compose -f deploy/docker-compose.yml down -v
+
 clean:
 	rm -rf bin $(DIST) coverage.out coverage.html

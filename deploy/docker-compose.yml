@@ -1,0 +1,79 @@
+# Эталонный smoke-контур (blueprint п. 15, DoD п. 22): app + ClickHouse +
+# MongoDB + seed. Зелёный smoke: скан quick-профилем дошёл до done и
+# вердикты видны в UI. Демо-креды зоны compose (не секреты).
+# Подъём: make smoke; очистка: make smoke-clean.
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: zond-smoke-ch
+    environment:
+      CLICKHOUSE_USER: zond
+      CLICKHOUSE_PASSWORD: zond-smoke
+      CLICKHOUSE_DB: smoke
+    volumes:
+      - ./seed/ch_init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "zond", "--password", "zond-smoke", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # порт наружу не публикуем: контур замкнут
+
+  mongo:
+    image: mongo:7
+    container_name: zond-smoke-mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: zond
+      MONGO_INITDB_ROOT_PASSWORD: zond-smoke
+      MONGO_INITDB_DATABASE: smoke
+    volumes:
+      - ./seed/mongo_init.js:/docker-entrypoint-initdb.d/init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "-u", "zond", "-p", "zond-smoke", "--authenticationDatabase", "admin", "--eval", "db.runCommand({ping:1})"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Один и тот же образ для разового скана и сервиса UI (build один раз).
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: zond:smoke
+    container_name: zond-smoke-app
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    volumes:
+      - ./smoke/configs:/configs:ro
+      - zond-data:/data
+    environment:
+      LLM_MAIN_KEY: smoke-dummy # не используется (скан без -llm)
+      LLM_STRONG_KEY: smoke-dummy
+    command: ["serve", "-config", "/configs", "-db", "/data/zond.db", "-addr", "0.0.0.0:8080"]
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  # Разовый quick-скан до первых вердиктов (DoD). Запуск: make smoke
+  # (compose --profile smoke run). БД общая с app — вердикты видны в UI.
+  smoke-scan:
+    image: zond:smoke
+    profiles: ["smoke"]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    volumes:
+      - ./smoke/configs:/configs:ro
+      - zond-data:/data
+    environment:
+      LLM_MAIN_KEY: smoke-dummy
+      LLM_STRONG_KEY: smoke-dummy
+    command: ["scan", "-config", "/configs", "-db", "/data/zond.db", "-source", "ch-smoke", "-profile", "quick"]
+
+volumes:
+  zond-data:

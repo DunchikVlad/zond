@@ -1,0 +1,36 @@
+# taxonomy.yaml — лейблы и классы чувствительности (blueprint п. 5.5; ADR-0004).
+# semver: minor — добавление лейбла; major — rename/remove с alias-маппингом;
+# patch — правка словарей. Промпт, UI и eval-датасет говорят на этом языке.
+version: "1.0.0"
+
+labels:
+  - {name: PERSON_NAME, sensitivity: PII}
+  - {name: PHONE, sensitivity: PII}
+  - {name: EMAIL, sensitivity: PII}
+  - {name: ADDRESS, sensitivity: PII}
+  - {name: CARD_NUMBER, sensitivity: PCI}
+  - {name: BANK_ACCOUNT, sensitivity: PCI}
+  - {name: PASSPORT_ID, sensitivity: PII}
+  - {name: TAX_ID, sensitivity: PII}
+  - {name: SNILS, sensitivity: PII}
+  - {name: IP_ADDRESS, sensitivity: PII}
+  - {name: DATE_OF_BIRTH, sensitivity: PII}
+  - {name: GEO_LOCATION, sensitivity: PII}
+  - {name: FREE_TEXT, sensitivity: none}
+  - {name: NUMERIC_MEASURE, sensitivity: none}
+  - {name: IDENTIFIER, sensitivity: none}
+  - {name: DATE_TIME, sensitivity: none}
+  - {name: BOOLEAN, sensitivity: none}
+  - {name: JSON_DOC, sensitivity: none}
+  - {name: UNKNOWN, sensitivity: none}
+
+# Словарь синонимов имён колонок для слоя 0 (blueprint п. 5.5, п. 7):
+# точное совпадение токена → confidence 0.85 (п. 5.6).
+synonyms:
+  EMAIL: [email, e-mail, mail, почта]
+  PHONE: [phone, telephone, tel, mobile, телефон, мобильный]
+  CARD_NUMBER: [card, pan, cc, карта]
+  TAX_ID: [inn, tin, инн]
+  SNILS: [snils, снилс]
+  PASSPORT_ID: [passport, паспорт]
+  PERSON_NAME: [name, fio, фио, имя]

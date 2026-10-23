@@ -1,0 +1,16 @@
+# connections.yaml smoke-контура (deploy/docker-compose.yml). Демо-креды
+# зоны compose (не секреты): внутренние сервисы недоступны снаружи.
+version: "1"
+
+sources:
+  - name: ch-smoke
+    type: clickhouse
+    dsn: "clickhouse://zond:zond-smoke@clickhouse:9000/smoke"
+  - name: mongo-smoke
+    type: mongodb
+    uri: "mongodb://zond:zond-smoke@mongo:27017/smoke"
+
+sso:
+  enabled: false # smoke: без SSO, actor api
+
+# vault/backup выключены: smoke — разовый контур до первых вердиктов (DoD п. 22).

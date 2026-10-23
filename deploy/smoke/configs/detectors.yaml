@@ -1,0 +1,58 @@
+# detectors.yaml — пороги каскада, профили сэмплирования, реестр агентов
+# (blueprint п. 5.2, п. 5.3, п. 5.6, п. 7, п. 12).
+# Hot-reload без рестарта — ADR-0014 (реализация позже, контракт — сейчас).
+version: "1"
+
+scan:
+  profile: deep # quick | deep | custom (blueprint п. 5.2)
+  sample:
+    mode: percent # rows | percent
+    value: 5
+    min_rows: 100 # ниже — берём всё
+    max_rows: 20000 # предохранитель
+    max_string_chars: 200 # усечение длинных строк
+    dedup_values: true # только уникальные значения в анализ
+
+ensemble:
+  tau_accept: 0.80 # >= и отрыв от второго лейбла >= 0.3 -> auto_accepted
+  tau_review: 0.50 # ниже — очередь ручного ревью
+  weights:
+    meta: 1.0
+    rules: 1.5
+    llm: 1.2
+
+cluster:
+  similarity: 0.80 # п. 7.6: совпадение типа и >=80% признаков отпечатка
+  max_size: 100 # транзитивное замыкание ограничено
+
+# Лимиты и egress-политика LLM-слоя (blueprint п. 10.4, п. 10.7).
+proxy:
+  offline: false # true — запрещены любые эндпоинты вне allowlist (вкл. loopback/RFC 1918)
+  max_concurrent: 8 # семафор конкурентных вызовов (0 → default 8)
+  rate_limit_rps: 4 # глобальный rate-limit запросов/сек (0 — без лимита)
+  cost_scan_limit_usd: 5 # budget-стоп скана со статусом budget_exceeded (0 — без лимита)
+
+agents:
+  - id: zond-main
+    endpoint: https://api.example/v1/chat
+    model: gpt-4o-mini
+    api_key_env: LLM_MAIN_KEY # имя env-переменной, не ключ
+    max_values_per_call: 25
+    timeout_s: 30
+    max_retries: 3
+    confidence_band: [0.30, 0.70] # вызывать только в «серой зоне»
+    escalate_to: zond-strong
+    # Egress-политика (п. 10.7): публичный эндпоинт разрешён только явной
+    # записью в allowlist (IP, CIDR или hostname), иначе — только loopback/RFC 1918.
+    # allowlist: ["203.0.113.10/32", "llm.corp.example"]
+  - id: zond-strong
+    endpoint: https://api.example/v1/chat
+    model: gpt-4o
+    api_key_env: LLM_STRONG_KEY
+    max_values_per_call: 25
+    timeout_s: 60
+    max_retries: 3
+    confidence_band: [0.30, 0.70]
+    # Egress-политика Agent Proxy (blueprint п. 10.7): внешние эндпоинты
+    # разрешены только явной записью в allowlist — не в этом файле.
+    # allowlist: ["203.0.113.10/32"]
