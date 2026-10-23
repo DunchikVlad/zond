@@ -109,6 +109,60 @@ func get(t *testing.T, client *http.Client, rawURL string) (int, string) {
 	return resp.StatusCode, string(b)
 }
 
+// testCSRFToken — double-submit пара cookie+заголовок (п. 14) для тестов
+// HTMX-мутаций: middleware сравнивает значения между собой.
+const testCSRFToken = "test-csrf-token-0123456789abcdef"
+
+func addCSRF(req *http.Request) {
+	req.AddCookie(&http.Cookie{Name: csrfCookie, Value: testCSRFToken})
+	req.Header.Set(csrfHeader, testCSRFToken)
+}
+
+// TestCSRFProtection — мутация без пары cookie+заголовок → 403 (п. 14);
+// с парой — проходит (дальше решает RBAC/логика).
+func TestCSRFProtection(t *testing.T) {
+	st := fixtureStore(t)
+	sessions := auth.NewSessionStore(0)
+	runner := &fakeRunner{}
+	ts, _ := newTestServer(t, st, sessions, true, runner)
+	admin := sessions.Create("admin@example.com", auth.RoleAdmin)
+	form := url.Values{"source": {"ch-test"}, "profile": {"deep"}}
+
+	post := func(mut func(*http.Request)) int {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/scans/start", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: admin.ID})
+		if mut != nil {
+			mut(req)
+		}
+		resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := post(nil); code != http.StatusForbidden {
+		t.Fatalf("без CSRF-пары: %d (ожидался 403)", code)
+	}
+	if code := post(func(r *http.Request) { r.Header.Set(csrfHeader, testCSRFToken) }); code != http.StatusForbidden {
+		t.Fatalf("заголовок без cookie: %d (ожидался 403)", code)
+	}
+	if code := post(func(r *http.Request) {
+		r.AddCookie(&http.Cookie{Name: csrfCookie, Value: testCSRFToken})
+		r.Header.Set(csrfHeader, "другой-токен")
+	}); code != http.StatusForbidden {
+		t.Fatalf("расхождение cookie/заголовок: %d (ожидался 403)", code)
+	}
+	if code := post(addCSRF); code != http.StatusFound {
+		t.Fatalf("с парой cookie+заголовок: %d (ожидался 302)", code)
+	}
+	if runner.started != "ch-test" {
+		t.Fatalf("runner.started: %q", runner.started)
+	}
+}
+
 func TestPagesRender(t *testing.T) {
 	st := fixtureStore(t)
 	sessions := auth.NewSessionStore(0)
@@ -205,6 +259,7 @@ func TestAuthRedirectAndRBAC(t *testing.T) {
 	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/scans/start", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: viewer.ID})
+	addCSRF(req)
 	resp, err = client.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -220,6 +275,7 @@ func TestAuthRedirectAndRBAC(t *testing.T) {
 	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/scans/start", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: admin.ID})
+	addCSRF(req)
 	resp, err = noRedirect.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -241,6 +297,7 @@ func TestReviewActions(t *testing.T) {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.Header.Set("HX-Request", "true")
 		req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: admin.ID})
+		addCSRF(req)
 		resp, err := ts.Client().Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -280,6 +337,7 @@ func TestReviewBulkAndAuditPage(t *testing.T) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("HX-Request", "true")
 	req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: admin.ID})
+	addCSRF(req)
 	resp, err := ts.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)

@@ -8,7 +8,9 @@
 package web
 
 import (
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -100,18 +102,55 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /alerts", s.handleAlerts)
 	mux.HandleFunc("GET /audit", s.requireRole(auth.ActionAudit, s.handleAudit))
 	mux.HandleFunc("GET /settings", s.handleSettings)
-	return s.withAuth(s.withSecurity(mux))
+	return s.withAuth(s.withCSRF(s.withSecurity(mux)))
 }
 
 // ---------------------------------------------------------------------------
 // middleware
 // ---------------------------------------------------------------------------
 
+// withSecurity — security-заголовки п. 14 (CSP default-src 'self', nosniff,
+// no-referrer).
 func (s *Server) withSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// CSRF double-submit (blueprint п. 14: CSRF-токены во всех HTMX-мутациях):
+// cookie zond_csrf (не HttpOnly — читает JS-инициализация в _header.html)
+// + обязательный заголовок X-CSRF-Token с тем же значением на любой
+// не-GET-запрос. Расхождение/отсутствие → 403. SameSite=Lax на cookie
+// добавляет второй слой (cross-site POST не несёт cookie).
+const (
+	csrfCookie = "zond_csrf"
+	csrfHeader = "X-CSRF-Token"
+)
+
+func (s *Server) withCSRF(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tok := ""
+		if c, err := r.Cookie(csrfCookie); err == nil {
+			tok = c.Value
+		}
+		if tok == "" {
+			var b [32]byte
+			_, _ = rand.Read(b[:])
+			tok = hex.EncodeToString(b[:])
+			http.SetCookie(w, &http.Cookie{
+				Name: csrfCookie, Value: tok, Path: "/",
+				SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
+			})
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			if r.Header.Get(csrfHeader) != tok || tok == "" {
+				s.renderError(w, http.StatusForbidden, "CSRF-токен отсутствует или неверен — обновите страницу")
+				return
+			}
+		}
 		next.ServeHTTP(w, r)
 	})
 }

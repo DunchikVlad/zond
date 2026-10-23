@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -167,6 +168,40 @@ func resolveSourceDSN(ctx context.Context, src *config.Source, r secrets.Resolve
 	return r.Resolve(ctx, src.Ref)
 }
 
+// secretsForRedact — значения env для redact-логирования (п. 14.1):
+// переменные, названные конфигурацией (api_key_env агентов, token_env
+// Vault), плюс эвристика имён (PASS/PWD/SECRET/TOKEN/KEY). Короткие (<6)
+// значения redactor игнорирует.
+func secretsForRedact(b *config.Bundle) []string {
+	names := map[string]bool{}
+	for _, a := range b.Detectors.Agents {
+		names[a.APIKeyEnv] = true
+	}
+	if b.Connections.Vault.Enabled && b.Connections.Vault.Auth.TokenEnv != "" {
+		names[b.Connections.Vault.Auth.TokenEnv] = true
+	}
+	var out []string
+	for name := range names {
+		if v := os.Getenv(name); v != "" {
+			out = append(out, v)
+		}
+	}
+	heuristic := regexp.MustCompile(`(?i)(pass|pwd|secret|token|apikey|private)`)
+	for _, e := range os.Environ() {
+		name, value, _ := strings.Cut(e, "=")
+		if len(value) >= 6 && heuristic.MatchString(name) {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// redactedLogger — JSON-логгер stderr с redact middleware (п. 14.1):
+// секреты по конфигу и эвристике имён env не попадают в лог.
+func redactedLogger(b *config.Bundle) *slog.Logger {
+	return logging.New(os.Stderr, "info", logging.NewSecretRedactor(secretsForRedact(b)...))
+}
+
 // ---------------------------------------------------------------------------
 // scan (этап 1: слои 0–1; -llm подключает слой 2, инкремент 4в)
 // ---------------------------------------------------------------------------
@@ -203,7 +238,7 @@ func runScan(args []string) int {
 		return 2
 	}
 	defer st.Close()
-	log := logging.New(os.Stderr, "info")
+	log := redactedLogger(b)
 	resolver, err := buildSecretsResolver(context.Background(), b, secretsAuditHook(st, log))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scan: vault: %v\n", err)
@@ -540,12 +575,12 @@ func runServe(args []string) int {
 			return 1
 		}
 	}
-	log := logging.New(os.Stderr, "info")
 	b, err := config.LoadAll(*dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "serve: конфигурация: %v\n", err)
 		return 2
 	}
+	log := redactedLogger(b)
 	st, err := store.Open(*dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "serve: verdict store: %v\n", err)

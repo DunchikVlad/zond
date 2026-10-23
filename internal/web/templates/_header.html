@@ -6,6 +6,14 @@
 <title>{{.Title}} — zond</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="/static/htmx.min.js"></script>
+<script>
+// CSRF double-submit (п. 14): мутации шлют заголовок X-CSRF-Token
+// из cookie zond_csrf; middleware web сравнивает их.
+document.body.addEventListener('htmx:configRequest', function (e) {
+  var m = document.cookie.match(/(?:^|;\s*)zond_csrf=([^;]+)/);
+  if (m) { e.detail.headers['X-CSRF-Token'] = decodeURIComponent(m[1]); }
+});
+</script>
 </head>
 <body>
 <nav>
