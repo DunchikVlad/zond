@@ -79,59 +79,53 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
-Снимок от 2026-10-24 ~14:30 UTC (сессия S7г-7 — **релиз v0.1 опубликован**;
-стенд развёрнут и работает):
+Снимок от 2026-10-24 ~16:30 UTC (сессия S8-2 — **п. 13.2 закрыт целиком**;
+код и «-док» запушены; юнит-тесты новых путей — отдельной задачей):
 
-- **Релиз v0.1 вышел**: эталонный smoke прогнан зелёным на стенде
-  (192.168.31.113, Docker 29.1.3, override mongo:4.4 — CPU без AVX):
-  quick-скан done, код 0, 15/15 таблиц, 373 вердикта, UI видит вердикты,
-  down -v чисто (протокол docs/validation/2026-10-24-smoke-stand.md).
-  Первый прогон поймал 2 дефекта контура (исправлены в `399abbd`):
-  smoke-scan без build-секции (pull несуществующего образа) и /data под
-  root в scratch (SQLite не открывался под UID 65534).
-- Запушено (main = origin/main = `399abbd`, тег `v0.1` на нём): инкременты
-  S0…S7г + S6г (make bench) + S7г-7 (smoke-фиксы, протокол). НЕ коммитится:
-  HANDOFF.md, evals/reports/bench.json (генерируемый).
-- Релизный pipeline сработал на теге: GitHub Release v0.1 с 15
-  артефактами (3 бинаря, SHA256SUMS, SBOM SPDX-JSON, cosign keyless
-  .sig/.pem для каждого), run conclusion=success.
-- Закрытые пробелы чеклиста п. 14: smoke (S7г-7), bench (S6г). Остались:
-  SIEM-sink (опция), шифрование тома — операторский чек, LICENSE — вопрос
-  владельцу, LLM-метрики DoD — без стенда.
-- **S8-1 (resource governance, п. 13.2) закрыт и запушен** (HEAD `8471a70`):
-  классификация ошибок драйверов (CH 159/202/203/241/252; Mongo
-  91/189/10107/13435/13436/11600/11602 + сетевые), retry ≤3 попыток только
-  на retryable, circuit breaker (5 подряд source_overload → пауза 5 мин,
-  partial, аудит source_paused, отказ в паузе), `scan -resume`
-  (миграция 0008 scan_tables.reason; serve шарит breaker). Подтверждено
-  на живом стенде против реального ClickHouse (имитация перегрузки:
-  max_execution_time + sleep-view): partial с breaker_tripped, отказ
-  повторного POST с until, resume done 7/7. Стенд восстановлен; на .113
-  работает сборка 25882f1. Остаток п. 13.2 — per-source лимиты
-  max_concurrent_scans/max_concurrent_tables (отдельной задачей).
-- Следующий шаг: на машине с docker — `make smoke` (зелёный прогон
-  зафиксировать в docs/validation), затем `git tag v0.1 && git push
-  origin v0.1` → release.yml соберёт бинари+SHA256SUMS+SBOM+cosign и
-  опубликует GitHub Release. Параллельно: circuit breaker (13.2) —
-  отдельным инкрементом, `cmd/eval run -llm` при появлении LLM-стенда,
-  ответ владельца по LICENSE.
-- Известные проблемы: `go` не в PATH свежего Git Bash — брать
-  `/c/Program Files/Go/bin` или scoop shim; стенды БД 192.168.31.119 и
-  keycloak могут быть недоступны (не поломка кода); LLM-стенда нет;
-  docker в сессии отсутствует (smoke не прогнан, release.yml не
-  исполнялся — сработает на теге; CI-шаг Bench слоя 1 первый прогон —
-  на ближайшем PR/push, yaml парсится штатно). Единичный флаки
+- **S8-2 (per-source лимиты + окна, п. 13.2) закрыт и запушен**: код-коммит
+  `39cbaf8` + «-док» (progress/validation/security/ADR-impl-stage-8-source-limits,
+  architecture.md 4.2, HANDOFF). connections.yaml: `max_concurrent_scans`
+  (default 1), `max_concurrent_tables` (default 2), `query_timeout_s`
+  (default 300), `scan_window "HH:MM-HH:MM"` (fail-fast; через полночь).
+  scanengine: пул воркеров поверх TableGate (результаты в порядке ListTables
+  — breaker-серия идентична sequential), queryCtx-дедлайны, состояние
+  прогона под мьютексами, буферы таблиц — локальные tableState. serve:
+  семафор max_concurrent_scans (502 сверх лимита). scheduler: перескан вне
+  окна → таймер до NextStart + аудит scheduler/scan_deferred; ручные
+  старты окном не ограничены (буква спеки). `make ci` и `make test-race`
+  зелёные, `config validate` OK. **Юнит-тесты новых путей НЕ написаны**
+  (владелец: тестирование — другой агент; чек-лист покрытия —
+  docs/validation/2026-10-24-stage-8-2.md раздел 2). Стенд 192.168.31.*
+  выключен — живой прогон не выполнялся.
+- **Релиз v0.1 опубликован ранее** (тег `v0.1` на `399abbd`): эталонный
+  smoke на стенде зелёный, GitHub Release с 15 артефактами (бинари,
+  SHA256SUMS, SBOM, cosign). Инкременты S0…S7г + S6г + S7г-7 + S8-1 —
+  в origin/main.
+- S8-1 (`8471a70`): классификация ошибок драйверов, retry ≤3 на retryable,
+  circuit breaker (5 подряд overload → пауза 5 мин, partial, аудит
+  source_paused), `scan -resume` (миграция 0008). Подтверждён живым
+  стендом (ClickHouse, max_execution_time + sleep-view).
+- **Следующий шаг** — юнит-тесты S8-2 (окно ParseWindow/Contains/NextStart;
+  scheduler deferral + аудит; параллельные воркеры: breaker-порядок,
+  gate-лимит, race с LLM-fake; runner max_concurrent_scans 502/освобождение
+  слота; валидация конфига). Параллельно доступны: SIEM-sink (опция п. 14.2),
+  LICENSE (вопрос владельцу), LLM-метрики DoD / `cmd/eval run -llm` (нет
+  стенда), живой прогон S8-2 на стенде при его включении.
+- Известные проблемы: `go` не в PATH свежего Git Bash на Windows-машине —
+  брать `/c/Program Files/Go/bin` или scoop shim (на macOS-машине —
+  homebrew go в PATH); стенды БД 192.168.31.119 и keycloak могут быть
+  недоступны (не поломка кода); LLM-стенда нет. Единичный флаки
   `go test -race ./...` — `internal/audit` под параллельной нагрузкой
-  (не затронут инкрементами; в изоляции стабильно ok). Часть .go-файлов
-  периодически с CRLF (особенно после stash) — норма LF, лечить
-  `gofmt -w` и проверять `gofmt -l .` перед коммитом (make ci его не
-  падает; в S6г ловилось выравнивание struct в benchlab.go).
+  (в изоляции стабильно ok). Часть .go-файлов периодически с CRLF —
+  норма LF, лечить `gofmt -w` и проверять `gofmt -l .` перед коммитом.
   `eval generate` меняет `generated` в manifest.json — `make eval` не
   регенерирует датасет. Git-статус может показывать phantom-modified:
   проверять `git diff`, `git add -u`. Smoke serve/doctor требует
-  фиктивные ENV: `set -a && . ./configs/ci.env`. ВНИМАНИЕ: `git add -A`
-  коммитит HANDOFF.md — добавлять файлы явно/проверять `git status`.
-  У release.yml проверка только yaml-парсингом — первый прогон на теге.
+  фиктивные ENV: `set -a && . ./configs/ci.env`. HANDOFF.md теперь
+  трекнут в репозитории (коммит `2e7c1f2`, перенос между машинами) —
+  обновление раздела 6 включается в «-док» коммит; всё равно добавлять
+  файлы явно, без `git add -A`. У release.yml проверка только
+  yaml-парсингом — прогон был на теге v0.1 (success).
 - Открытые вопросы: выбор LICENSE для репозитория (go-licenses игнорирует
   собственный модуль; решение — за владельцем проекта).
 
