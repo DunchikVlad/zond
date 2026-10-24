@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 LDFLAGS := -X main.Version=$(VERSION) -X main.Commit=$(COMMIT)
 
-.PHONY: build test test-race vet fmt lint cover config-check ci eval clean
+.PHONY: build test test-race vet fmt lint cover config-check ci eval bench clean
 
 build: ## Сборка bin/zond с версией из git
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/zond
@@ -37,6 +37,15 @@ ci: fmt vet build test ## Локальный прогон CI-ворот
 # LLM-слой: go run ./cmd/eval run -llm (см. usage подкоманды).
 eval: ## Отчёт F1 и $/1000 колонок по датасету (evals/reports/report.json)
 	go run ./cmd/eval run
+
+# ---------------------------------------------------------------------------
+# Нагрузочный тест слоя 1 (blueprint п. 16.8): 1M детерминированных
+# синтетических значений через rules.Analyze; NFR п. 18 — ≥100 000
+# значений/мин на ядро. Код выхода 1 при провале (CI-гейт, ci.yml).
+# Отчёт — evals/reports/bench.json (в git не коммитится, .gitignore).
+# ---------------------------------------------------------------------------
+bench: ## Нагрузочный тест слоя 1: 1M значений, NFR п. 18 (≥100k знач/мин на ядро)
+	go run ./cmd/eval bench
 
 # ---------------------------------------------------------------------------
 # Релиз (S7г, blueprint п. 15/18): кросс-сборка, checksums, SBOM (syft),

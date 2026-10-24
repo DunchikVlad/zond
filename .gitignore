@@ -34,3 +34,7 @@ desktop.ini
 /bin/
 /dist/
 sbom*.json
+
+# Нагрузочный тест слоя 1 (п. 16.8): отчёт содержит wall-clock метрики —
+# недетерминирован, генерируется прогоном (make bench), в git не коммитится
+evals/reports/bench.json

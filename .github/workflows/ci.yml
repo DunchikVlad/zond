@@ -30,6 +30,11 @@ jobs:
       - name: Unit tests (race)
         run: go test -race -coverprofile=coverage.out ./...
 
+      # П. 16.8: нагрузочный тест слоя 1 (1M значений) как CI-гейт;
+      # NFR п. 18 — ≥100k значений/мин на ядро. Файл отчёта в раннере не нужен.
+      - name: Bench слоя 1 (NFR п. 18)
+        run: go run ./cmd/eval bench -out ""
+
       - name: Config check (фиктивные ENV из configs/ci.env)
         run: set -a && . ./configs/ci.env && set +a && go run ./cmd/zond config validate
 

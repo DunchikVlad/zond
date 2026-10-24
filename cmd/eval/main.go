@@ -37,6 +37,8 @@ func run(args []string) int {
 		return runGenerate(args[1:])
 	case "run":
 		return runHarness(args[1:])
+	case "bench":
+		return runBench(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return 0
@@ -308,4 +310,6 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  eval run [-dataset evals/dataset] [-taxonomy configs/taxonomy.yaml] [-detectors configs/detectors.yaml]")
 	fmt.Fprintln(os.Stderr, "           [-llm [-agent id] [-endpoint URL]] [-price-in 0] [-price-out 0]")
 	fmt.Fprintln(os.Stderr, "           [-out evals/reports/report.json] [-limit 0] [-tau-grid 0.50:0.05:0.95]")
+	fmt.Fprintln(os.Stderr, "  eval bench [-n 1000000] [-seed 20261024] [-col-size 1000] [-pos 0.25] [-threshold 0]")
+	fmt.Fprintln(os.Stderr, "             [-out evals/reports/bench.json]")
 }
