@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -464,22 +465,27 @@ func (e *Engine) scanTablesSequential(ctx context.Context, conn connector.Connec
 }
 
 // scanTablesParallel — пул из MaxTables воркеров (п. 13.2, gate ёмкостью
-// max_concurrent_tables источника). Результаты собираются в порядке
+// max_concurrent_tables источника). Результаты применяются в порядке
 // ListTables: серия breaker'а (5 подряд overload) и итоговые счётчики
-// совпадают с последовательным путём; при сработке breaker'а обработка
-// останавливается на той же таблице, что и в sequential-режиме. Возвращает
-// серию overload на выходе и признак мягкой остановки (ctx отменён —
-// прогон фиксируется interrupted; начатые таблицы коммитятся, п. 13).
+// совпадают с последовательным путём; при сработке breaker'а подача новых
+// таблиц прекращается (stopFeed), начатые коммитят чекпоинты (п. 13),
+// не начатые не тронуты (resume догонит). Возвращает серию overload на
+// выходе и признак мягкой остановки (ctx отменён → interrupted).
+//
+// Блокировки: results буферизован на все задачи — воркеры никогда не
+// блокируются на отправке; коллектор выходит по закрытию results (после
+// wg.Wait в горутине) или по отмене ctx. Дедлоков нет по построению.
 func (e *Engine) scanTablesParallel(ctx context.Context, conn connector.Connector, scanID string, tables []connector.TableRef, rep *Report) (int, bool) {
 	type result struct {
 		idx      int
-		timedOut bool // ожидание слота/работа прерваны ctx-отменой (не failed-таблица)
+		timedOut bool // ожидание слота/работа прерваны отменой прогона (не failed-таблица)
 		failed   bool
 		overload bool
 	}
 	gate := NewTableGate(e.cfg.MaxTables)
 	tasks := make(chan int)
-	results := make(chan result)
+	results := make(chan result, len(tables))
+	stopFeed := make(chan struct{}) // закрывается при сработке breaker'а
 	var wg sync.WaitGroup
 	for range e.cfg.MaxTables {
 		wg.Add(1)
@@ -498,9 +504,10 @@ func (e *Engine) scanTablesParallel(ctx context.Context, conn connector.Connecto
 				switch {
 				case err == nil:
 					results <- result{idx: idx}
-				case ctx.Err() != nil:
+				case ctx.Err() != nil || errors.Is(err, context.Canceled):
 					// отмена прогона ≠ ошибка таблицы: interrupted-прогон не
-					// должен кормить серию breaker'а
+					// должен кормить серию breaker'а (конкурентный stop может
+					// прийти до отмены ctx воркера — ловим и по самой ошибке)
 					results <- result{idx: idx, timedOut: true}
 				default:
 					results <- result{idx: idx, failed: true,
@@ -514,31 +521,38 @@ func (e *Engine) scanTablesParallel(ctx context.Context, conn connector.Connecto
 		for i := range tables {
 			select {
 			case tasks <- i:
+			case <-stopFeed:
+				return // breaker: новых таблиц не начинаем (п. 13.2)
 			case <-ctx.Done():
 				return
 			}
 		}
 	}()
+	go func() { wg.Wait(); close(results) }()
 
 	consecutiveOverload := 0
 	interrupted := false
-	stopFeed := false
+	tripped := false
 	pending := map[int]result{}
 	next := 0
 	for next < len(tables) {
 		r, ok := pending[next]
 		if !ok {
 			var open bool
-			r, open = <-results
-			if !open {
-				break
+			select {
+			case r, open = <-results:
+			case <-ctx.Done():
+				interrupted = true
+			}
+			if interrupted || !open {
+				break // прогон отменён или воркеры завершились: остаток не обработан
 			}
 			pending[r.idx] = r
 			continue
 		}
 		delete(pending, next)
 		next++
-		if stopFeed {
+		if tripped {
 			continue // breaker сработал раньше — таблица не считается
 		}
 		switch {
@@ -552,18 +566,15 @@ func (e *Engine) scanTablesParallel(ctx context.Context, conn connector.Connecto
 				consecutiveOverload = 0
 			}
 			if e.tripBreakerIfNeeded(ctx, scanID, rep, consecutiveOverload) {
-				stopFeed = true
+				tripped = true
+				close(stopFeed)
 			}
 		default:
 			rep.TablesDone++
 			consecutiveOverload = 0
 		}
 	}
-	if stopFeed {
-		wg.Wait() // начатые воркеры коммитят чекпоинты (п. 13); закрытие results
-		for range results {
-		}
-	}
+	wg.Wait() // начатые таблицы коммитят чекпоинты (п. 13); результаты — в буфер
 	if ctx.Err() != nil {
 		interrupted = true
 	}
