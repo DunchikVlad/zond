@@ -58,3 +58,29 @@
 - Доступны ли веб-интерфейсы (ClickHouse HTTP, Mongo Express) и открытые порты.
 - Владелец стенда и порядок его обслуживания (соответствие blueprint п. 19.1,
   решение 3 «Окно эксплуатации»).
+
+## 8. Дополнение 2026-10-24: стенд развёрнут и работает
+
+Ответы на вопросы п. 7 и факты развёртывания (протокол —
+`docs/validation/2026-10-24-stand-deployment.md`):
+
+- **ОС**: Ubuntu 26.04.1 LTS (ядро 7.0.0-38-generic) на обоих хостах;
+  Docker **отсутствует** → приложение и БД развёрнуты нативно (бинарник +
+  systemd, apt/tarball).
+- **CPU**: Intel Core i7-6700 без флагов AVX → ClickHouse 26.x не
+  работает (SIGILL), зафиксирован **24.8.14.39** (LTS); MongoDB ≥5.0
+  требует AVX → зафиксирована **4.4.29** (tarball, libssl1.1 из
+  security-пула Ubuntu через LD_LIBRARY_PATH).
+- **`.113` (приложение)**: `/opt/zond/{bin,configs,data,zond.env}`,
+  systemd `zond.service`, UI/API на `:8080`; бинарник — свежая сборка
+  main (`c3a1350`), env-файл mode 600 (там CLASSIFIER_ADMIN_TOKEN).
+- **`.119` (БД)**: ClickHouse listen `0.0.0.0:9000/8123`, пользователь
+  `test`/`test` (SELECT на default.* — read-only, п. 12), сид
+  `default.customers`; MongoDB listen `0.0.0.0:27017`, authorization
+  enabled, `test`/`test` (read на testdb) + `admin`/`test` (обслуживание),
+  сид `testdb.customers`.
+- **Проверено (2026-10-24)**: doctor -online — оба тестовых источника OK;
+  сканы quick ch-test/mongo-test — done, вердикты (CH: 5, Mongo: 4) видны
+  в API и UI; ревью-контур (confirm) работает.
+- **SSH-доступ**: пароль test работает (интерактивно/через SSH_ASKPASS);
+  ключи не настроены — рекомендация п. 4 в силе.
