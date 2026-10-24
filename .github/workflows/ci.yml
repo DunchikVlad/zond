@@ -1,6 +1,7 @@
 # CI-ворота (blueprint п. 16.7 — базовый набор этапа 0:
 # fmt, vet, build, test -race, проверка конфигов; lint — отдельным шагом).
-# Расширения этапов 3–7: go-licenses, govulncheck, SBOM, coverage gates.
+# Расширения этапов 3–7: go-licenses, govulncheck, SBOM, coverage gates,
+# fuzz парсеров (п. 16.10, S8-4).
 name: ci
 
 on:
@@ -29,6 +30,18 @@ jobs:
 
       - name: Unit tests (race)
         run: go test -race -coverprofile=coverage.out ./...
+
+      # П. 16.10: fuzz парсеров — BSON-флаттенинг, YAML-конфига,
+      # JSON-ответа агента, маскировщиков. Сиды — в f.Add/testdata; прогон
+      # короткий (гейт), полный фаззинг — ночной/ручной.
+      - name: Fuzz (п. 16.10)
+        run: |
+          go test -fuzz=FuzzMask -fuzztime=15s ./internal/agentproxy/mask/
+          go test -fuzz=FuzzAgentResponse -fuzztime=15s ./internal/agentproxy/
+          go test -fuzz=FuzzLoadConnections -fuzztime=15s ./internal/config/
+          go test -fuzz=FuzzLoadDetectors -fuzztime=15s ./internal/config/
+          go test -fuzz=FuzzLoadTaxonomy -fuzztime=15s ./internal/config/
+          go test -fuzz=FuzzFlattenDocument -fuzztime=15s ./internal/connector/mongodb/
 
       # П. 16.8: нагрузочный тест слоя 1 (1M значений) как CI-гейт;
       # NFR п. 18 — ≥100k значений/мин на ядро. Файл отчёта в раннере не нужен.

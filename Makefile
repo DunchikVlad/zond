@@ -3,7 +3,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 LDFLAGS := -X main.Version=$(VERSION) -X main.Commit=$(COMMIT)
 
-.PHONY: build test test-race vet fmt lint cover config-check ci eval bench clean
+.PHONY: build test test-race vet fmt lint cover config-check ci eval bench clean fuzz
 
 build: ## Сборка bin/zond с версией из git
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/zond
@@ -31,6 +31,18 @@ config-check: build
 	set -a && . ./configs/ci.env && set +a && ./bin/$(BINARY) config validate
 
 ci: fmt vet build test ## Локальный прогон CI-ворот
+
+# Fuzz парсеров (blueprint п. 16.10, S8-4): маскировщики, JSON-ответ агента,
+# YAML-конфиги, BSON-флаттенинг. Короткий прогон — в CI (ci.yml); здесь —
+# локальный/ручной (подольше). Сиды — в f.Add; corpus CI копит в кэше.
+FUZZTIME ?= 30s
+fuzz: ## Fuzz парсеров (п. 16.10), FUZZTIME на цель (default 30s)
+	go test -fuzz=FuzzMask -fuzztime=$(FUZZTIME) ./internal/agentproxy/mask/
+	go test -fuzz=FuzzAgentResponse -fuzztime=$(FUZZTIME) ./internal/agentproxy/
+	go test -fuzz=FuzzLoadConnections -fuzztime=$(FUZZTIME) ./internal/config/
+	go test -fuzz=FuzzLoadDetectors -fuzztime=$(FUZZTIME) ./internal/config/
+	go test -fuzz=FuzzLoadTaxonomy -fuzztime=$(FUZZTIME) ./internal/config/
+	go test -fuzz=FuzzFlattenDocument -fuzztime=$(FUZZTIME) ./internal/connector/mongodb/
 
 # Отчёт F1/$ по эталонному датасету (слоёв 0+1, детерминировано; датасет
 # закоммичен, регенерация — `go run ./cmd/eval generate`, меняет manifest).
