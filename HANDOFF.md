@@ -79,24 +79,24 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
-Снимок от 2026-10-24 ~16:30 UTC (сессия S8-2 — **п. 13.2 закрыт целиком**;
-код и «-док» запушены; юнит-тесты новых путей — отдельной задачей):
+Снимок от 2026-10-24 ~17:30 UTC (сессия S8-2 — **п. 13.2 закрыт целиком,
+юнит-тесты новых путей написаны**; всё запушено):
 
-- **S8-2 (per-source лимиты + окна, п. 13.2) закрыт и запушен**: код-коммит
-  `39cbaf8` + «-док» (progress/validation/security/ADR-impl-stage-8-source-limits,
-  architecture.md 4.2, HANDOFF). connections.yaml: `max_concurrent_scans`
-  (default 1), `max_concurrent_tables` (default 2), `query_timeout_s`
-  (default 300), `scan_window "HH:MM-HH:MM"` (fail-fast; через полночь).
-  scanengine: пул воркеров поверх TableGate (результаты в порядке ListTables
-  — breaker-серия идентична sequential), queryCtx-дедлайны, состояние
-  прогона под мьютексами, буферы таблиц — локальные tableState. serve:
-  семафор max_concurrent_scans (502 сверх лимита). scheduler: перескан вне
-  окна → таймер до NextStart + аудит scheduler/scan_deferred; ручные
-  старты окном не ограничены (буква спеки). `make ci` и `make test-race`
-  зелёные, `config validate` OK. **Юнит-тесты новых путей НЕ написаны**
-  (владелец: тестирование — другой агент; чек-лист покрытия —
-  docs/validation/2026-10-24-stage-8-2.md раздел 2). Стенд 192.168.31.*
-  выключен — живой прогон не выполнялся.
+- **S8-2 (per-source лимиты + окна, п. 13.2) закрыт**: код `39cbaf8`, «-док»
+  `3f92445`, юнит-тесты + фикс коллектора `4fb7d61`. connections.yaml:
+  `max_concurrent_scans` (default 1), `max_concurrent_tables` (default 2),
+  `query_timeout_s` (default 300), `scan_window "HH:MM-HH:MM"` (fail-fast;
+  через полночь). scanengine: пул воркеров поверх TableGate (результаты в
+  порядке ListTables — breaker-серия идентична sequential), queryCtx-
+  дедлайны, состояние прогона под мьютексами, буферы таблиц — локальные
+  tableState. serve: семафор max_concurrent_scans (502 сверх лимита).
+  scheduler: перескан вне окна → таймер до NextStart + аудит
+  scheduler/scan_deferred; ручные старты окном не ограничены (буква спеки).
+  `make ci` и `make test-race` зелёные, `config validate` OK. Тесты нашли
+  дефект коллектора scanTablesParallel (зависание при остановке feeder'а —
+  исправлен: буфер results, stopFeed, закрытие после wg.Wait). Стенд
+  192.168.31.* выключен — живой прогон не выполнялся (при включении —
+  проверить параллелизм/дедлайны на реальном ClickHouse).
 - **Релиз v0.1 опубликован ранее** (тег `v0.1` на `399abbd`): эталонный
   smoke на стенде зелёный, GitHub Release с 15 артефактами (бинари,
   SHA256SUMS, SBOM, cosign). Инкременты S0…S7г + S6г + S7г-7 + S8-1 —
@@ -105,12 +105,10 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
   circuit breaker (5 подряд overload → пауза 5 мин, partial, аудит
   source_paused), `scan -resume` (миграция 0008). Подтверждён живым
   стендом (ClickHouse, max_execution_time + sleep-view).
-- **Следующий шаг** — юнит-тесты S8-2 (окно ParseWindow/Contains/NextStart;
-  scheduler deferral + аудит; параллельные воркеры: breaker-порядок,
-  gate-лимит, race с LLM-fake; runner max_concurrent_scans 502/освобождение
-  слота; валидация конфига). Параллельно доступны: SIEM-sink (опция п. 14.2),
-  LICENSE (вопрос владельцу), LLM-метрики DoD / `cmd/eval run -llm` (нет
-  стенда), живой прогон S8-2 на стенде при его включении.
+- **Следующий шаг** — по выбору: SIEM-sink (опция п. 14.2, отдельный
+  инкремент), LICENSE (вопрос владельцу), LLM-метрики DoD /
+  `cmd/eval run -llm` (нет стенда), живой прогон S8-2 на стенде при его
+  включении. Долгов по коду нет: п. 13.2 закрыт (S8-1 + S8-2 с тестами).
 - Известные проблемы: `go` не в PATH свежего Git Bash на Windows-машине —
   брать `/c/Program Files/Go/bin` или scoop shim (на macOS-машине —
   homebrew go в PATH); стенды БД 192.168.31.119 и keycloak могут быть
