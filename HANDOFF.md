@@ -79,8 +79,20 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
-Снимок от 2026-10-24 ~18:30 UTC (сессия S8-3 — **SIEM-sink реализован**;
-код + тесты + «-док» запушены):
+Снимок от 2026-10-24 ~19:15 UTC (сессия S8-4 — **fuzz парсеров, п. 16.10
+закрыт**; код + «-док» запушены):
+
+- **S8-4 (fuzz, п. 16.10) закрыт и запушен**: код `4f00926` + «-док»
+  (progress/validation/security/ADR-impl-stage-8-4-fuzz, HANDOFF).
+  Новые fuzz: `agentproxy.FuzzAgentResponse` (сырой content в валидной
+  OpenAI-обёртке — разбор схемы п. 5.3 не паникует) и
+  `config.FuzzLoad{Connections,Detectors,Taxonomy}` (парсер + строгая схема
+  + интерполяция + валидация — fail-fast, не паника). Существующие
+  `FuzzMask` и `FuzzFlattenDocument` — в CI. ci.yml: шаг «Fuzz (п. 16.10)»
+  (6 целей × 15 с). Makefile: `make fuzz` (FUZZTIME). Сиды в f.Add;
+  corpus CI копит кэш раннера. `make ci` зелёный; все 6 целей прогнаны
+  локально — PASS. Первый CI-прогон шага Fuzz — на ближайшем push
+  (зафиксировать в следующем протоколе).
 
 - **S8-3 (SIEM-sink, п. 14.2) закрыт и запушен**: код `f57f55e` + «-док»
   (progress/validation/security/ADR-impl-stage-8-3-siem-sink, architecture
@@ -125,8 +137,8 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
   LLM-метрики DoD / `cmd/eval run -llm` (нет стенда), живой прогон
   S8-2/S8-3 на стенде при его включении (параллелизм/дедлайны п. 13.2;
   serve с audit.sink → тестовый приёмник, сверка по hash-chain).
-  Долгов по коду нет: п. 13.2 (S8-1+S8-2) и опция п. 14.2 (S8-3) закрыты
-  с тестами.
+  Долгов по коду нет: п. 13.2 (S8-1+S8-2), опция п. 14.2 (S8-3) и
+  fuzz п. 16.10 (S8-4) закрыты с тестами.
 - Известные проблемы: `go` не в PATH свежего Git Bash на Windows-машине —
   брать `/c/Program Files/Go/bin` или scoop shim (на macOS-машине —
   homebrew go в PATH); стенды БД 192.168.31.119 и keycloak могут быть
