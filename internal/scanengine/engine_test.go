@@ -20,6 +20,25 @@ type fakeConnector struct {
 	tables map[string][]connector.Column
 	data   map[string][]connector.Row
 	errs   map[string]error // имитация ошибок: "schema:<table>" | "sample:<table>"
+	// errCount — сколько раз ошибка отдаётся до самоисцеления (retry-тесты,
+	// инкремент 8): по исчерпании счётчика таблица работает штатно.
+	errCount map[string]int
+	calls    map[string]int // учёт вызовов (проверка пропуска при resume)
+}
+
+func (f *fakeConnector) popErr(key string) error {
+	if n := f.errCount[key]; n > 0 {
+		err := f.errs[key]
+		if n == 1 {
+			// самоисцеление: счётчик исчерпан — статическая ошибка больше не действует
+			delete(f.errCount, key)
+			delete(f.errs, key)
+		} else {
+			f.errCount[key] = n - 1
+		}
+		return err
+	}
+	return nil
 }
 
 func (f *fakeConnector) Ping(ctx context.Context) error { return nil }
@@ -34,7 +53,15 @@ func (f *fakeConnector) ListTables(ctx context.Context) ([]connector.TableRef, e
 }
 
 func (f *fakeConnector) GetSchema(ctx context.Context, t connector.TableRef) ([]connector.Column, error) {
-	if err, ok := f.errs["schema:"+t.Name]; ok {
+	if f.calls == nil {
+		f.calls = map[string]int{}
+	}
+	key := "schema:" + t.Name
+	f.calls[key]++
+	if err := f.popErr(key); err != nil {
+		return nil, err
+	}
+	if err, ok := f.errs[key]; ok {
 		return nil, err
 	}
 	return f.tables[t.Name], nil
@@ -45,7 +72,15 @@ func (f *fakeConnector) CountRows(ctx context.Context, t connector.TableRef) (in
 }
 
 func (f *fakeConnector) Sample(ctx context.Context, spec connector.SampleSpec) (iter.Seq2[connector.Row, error], error) {
-	if err, ok := f.errs["sample:"+spec.Table.Name]; ok {
+	if f.calls == nil {
+		f.calls = map[string]int{}
+	}
+	key := "sample:" + spec.Table.Name
+	f.calls[key]++
+	if err := f.popErr(key); err != nil {
+		return nil, err
+	}
+	if err, ok := f.errs[key]; ok {
 		return nil, err
 	}
 	rows := f.data[spec.Table.Name]

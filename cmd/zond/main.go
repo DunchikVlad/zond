@@ -213,6 +213,7 @@ func runScan(args []string) int {
 	dbPath := fs.String("db", "zond.db", "файл Verdict Store (SQLite)")
 	profile := fs.String("profile", "", "профиль quick|deep|custom (по умолчанию — из detectors.yaml)")
 	useLLM := fs.Bool("llm", false, "подключить LLM-слой из реестра agents detectors.yaml")
+	resume := fs.Bool("resume", false, "догнать последний partial/interrupted прогон источника (пропустить done-таблицы, п. 13.2)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -270,6 +271,21 @@ func runScan(args []string) int {
 		prof = b.Detectors.Scan.Profile
 	}
 	cfg := engineConfig(b)
+	// Circuit breaker (п. 13.2): в CLI экземпляр на процесс — срабатывание
+	// внутри прогона корректно; в serve шарится между прогонами (runner).
+	cfg.Breaker = scanengine.NewBreaker()
+	if *resume {
+		prev, err := st.LastCheckpointScan(context.Background(), src.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "scan: -resume: %v\n", err)
+			return 2
+		}
+		if prev == nil {
+			fmt.Fprintf(os.Stderr, "scan: -resume: нет partial/interrupted прогона для источника %q\n", src.Name)
+			return 2
+		}
+		cfg.ResumeFrom = prev.ID
+	}
 	eng := scanengine.New(st, meta.New(b.Taxonomy.Synonyms), cfg)
 	if *useLLM {
 		comp, id, err := buildLLMComposite(b, taxonomyLabels(b.Taxonomy))
@@ -425,12 +441,14 @@ func taxonomyLabels(t *config.Taxonomy) []string {
 // engineRunner — api.ScanRunner поверх scanengine: асинхронные прогоны с
 // мягкой остановкой через ctx (п. 11.2). Resource governance этапа 5:
 // один активный прогон на источник (п. 13.2; per-source caps).
+// Инкремент 8: общий circuit breaker процесса (п. 13.2).
 type engineRunner struct {
 	b        *config.Bundle
 	st       *store.Store
 	log      *slog.Logger
 	useLLM   bool
 	resolver secrets.Resolver // ref-источников (Vault, ADR-0012); nil — режим ENV
+	breaker  *scanengine.Breaker
 
 	mu      sync.Mutex
 	running map[string]context.CancelFunc // scan_id → cancel
@@ -440,6 +458,7 @@ type engineRunner struct {
 func newEngineRunner(b *config.Bundle, st *store.Store, log *slog.Logger, useLLM bool, resolver secrets.Resolver) *engineRunner {
 	return &engineRunner{
 		b: b, st: st, log: log, useLLM: useLLM, resolver: resolver,
+		breaker: scanengine.NewBreaker(),
 		running: map[string]context.CancelFunc{}, sources: map[string]bool{},
 	}
 }
@@ -452,6 +471,10 @@ func (r *engineRunner) Start(source, profile, actor string) (string, error) {
 	src, err := findSource(r.b.Connections, source)
 	if err != nil {
 		return "", &api.BadScanRequestError{Reason: err.Error()}
+	}
+	// Circuit breaker (п. 13.2): источник на паузе — отказ до подключения.
+	if perr := r.breaker.PausedErr(source, time.Now()); perr != nil {
+		return "", &api.SourceUnavailableError{Reason: perr.Error()}
 	}
 	if profile == "" {
 		profile = r.b.Detectors.Scan.Profile
@@ -515,6 +538,7 @@ func (r *engineRunner) Start(source, profile, actor string) (string, error) {
 		}()
 		cfg := engineConfig(r.b)
 		cfg.Actor = actor // п. 14.2: прогон аудируется от имени инициатора
+		cfg.Breaker = r.breaker
 		eng := scanengine.New(r.st, meta.New(r.b.Taxonomy.Synonyms), cfg)
 		if llm != nil {
 			eng.SetLLM(llm, llmID)
@@ -1160,7 +1184,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "использование:")
 	fmt.Fprintln(os.Stderr, "  zond version")
 	fmt.Fprintln(os.Stderr, "  zond config validate [-dir configs]")
-	fmt.Fprintln(os.Stderr, "  zond scan -source <имя> [-config configs] [-db zond.db] [-profile quick|deep|custom] [-llm]")
+	fmt.Fprintln(os.Stderr, "  zond scan -source <имя> [-config configs] [-db zond.db] [-profile quick|deep|custom] [-llm] [-resume]")
 	fmt.Fprintln(os.Stderr, "  zond agent-check [-config configs] [-online]")
 	fmt.Fprintln(os.Stderr, "  zond doctor [-config configs] [-db zond.db] [-online]")
 	fmt.Fprintln(os.Stderr, "  zond backup -out <path> [-db zond.db]")

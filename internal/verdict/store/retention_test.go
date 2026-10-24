@@ -49,7 +49,7 @@ func TestPurgeScansOlderThan(t *testing.T) {
 
 	// Старый прогон с вердиктами, вызовами агентов и чекпоинтом таблицы.
 	mustSaveFinishedScan(t, st, "old-1", "ch", now.Add(-91*24*time.Hour))
-	if err := st.MarkTable(ctx, "old-1", "users", 100, "done", ""); err != nil {
+	if err := st.MarkTable(ctx, "old-1", "users", 100, "done", "", ""); err != nil {
 		t.Fatalf("MarkTable: %v", err)
 	}
 	vOld := verdict.Verdict{ID: "old-v1", ScanID: "old-1", Table: "users", Path: "email",

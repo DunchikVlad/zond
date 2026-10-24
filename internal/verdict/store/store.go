@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -99,14 +100,62 @@ func (s *Store) FinishScan(ctx context.Context, id, status, statsJSON string, fi
 }
 
 // MarkTable — чекпоинт таблицы внутри прогона (blueprint п. 13).
-func (s *Store) MarkTable(ctx context.Context, scanID, table string, rowCount int64, status, errMsg string) error {
+// reason — классификация ошибки (п. 13.2, connector.FailureReason):
+// 'source_overload' для retryable-ошибок драйвера, иначе ”.
+func (s *Store) MarkTable(ctx context.Context, scanID, table string, rowCount int64, status, errMsg, reason string) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO scan_tables (scan_id, table_name, row_count, status, error)
-		 VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO scan_tables (scan_id, table_name, row_count, status, error, reason)
+		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (scan_id, table_name) DO UPDATE SET
-		   row_count = excluded.row_count, status = excluded.status, error = excluded.error`,
-		scanID, table, rowCount, status, errMsg)
+		   row_count = excluded.row_count, status = excluded.status,
+		   error = excluded.error, reason = excluded.reason`,
+		scanID, table, rowCount, status, errMsg, reason)
 	return err
+}
+
+// DoneTables — таблицы прогона, успешно обработанные до чекпоинта
+// (blueprint п. 13.2, основа --resume).
+func (s *Store) DoneTables(ctx context.Context, scanID string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT table_name FROM scan_tables WHERE scan_id = ? AND status = 'done'`, scanID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out[name] = true
+	}
+	return out, rows.Err()
+}
+
+// LastCheckpointScan — последний прогон источника, который можно догнать
+// через --resume: статус partial (часть таблиц failed/не тронуты) или
+// interrupted (мягкая остановка, п. 11.2). Нет такого — (nil, nil).
+func (s *Store) LastCheckpointScan(ctx context.Context, source string) (*Scan, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, source_name, profile, status, started_at, stats_json
+		 FROM scans
+		 WHERE source_name = ? AND status IN ('partial', 'interrupted')
+		 ORDER BY started_at DESC LIMIT 1`, source)
+	var sc Scan
+	var started string
+	if err := row.Scan(&sc.ID, &sc.SourceName, &sc.Profile, &sc.Status, &started, &sc.StatsJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	t, err := time.Parse(time.RFC3339, started)
+	if err != nil {
+		return nil, err
+	}
+	sc.StartedAt = t
+	return &sc, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -62,7 +62,18 @@ type Config struct {
 	// Инкремент 5а: аудит действий (ADR-0013, п. 14.2) — автор событий
 	// скана ("cli" по умолчанию; в этапе 5 — sso:<subject>/token:<id>).
 	Actor string
+
+	// Инкремент 8: resource governance (blueprint п. 13.2). Breaker — общий
+	// circuit breaker процесса (nil — выключен: unit-тесты без пауз).
+	Breaker *Breaker
+	// ResumeFrom — id прогона (partial/interrupted), чьи done-таблицы
+	// пропускаются (--resume, п. 13.2).
+	ResumeFrom string
 }
+
+// retryBackoff — паузы между повторами retryable-таблицы (п. 13.2):
+// retry только на retryable-ошибки драйвера, всего до 3 попыток.
+var retryBackoff = []time.Duration{250 * time.Millisecond, time.Second}
 
 // LLMIdentity — идентичность агента для учётных записей agent_calls
 // (blueprint п. 10.6): кто и какая моделя выполнила вызов.
@@ -143,6 +154,9 @@ type Report struct {
 	TablesTotal       int
 	TablesDone        int
 	TablesFailed      int
+	Skipped           int    // таблицы, пропущенные по чекпоинтам resume (п. 13.2)
+	ResumeFrom        string // id прогона-чекпоинта (--resume; "" — полный прогон)
+	BreakerTripped    bool   // circuit breaker остановил прогон (п. 13.2)
 	Verdicts          int
 	Pending           int
 	ByLabel           map[string]int
@@ -163,6 +177,12 @@ func (r *Report) Text(w io.Writer) {
 	fmt.Fprintf(w, "\n=== Скан %s — источник %s (профиль %s) ===\n", r.ScanID, r.Source, r.Profile)
 	fmt.Fprintf(w, "Статус: %s   Длительность: %s\n", r.Status, r.FinishedAt.Sub(r.StartedAt).Round(time.Millisecond))
 	fmt.Fprintf(w, "Таблицы: %d всего, %d обработано, %d с ошибками\n", r.TablesTotal, r.TablesDone, r.TablesFailed)
+	if r.ResumeFrom != "" {
+		fmt.Fprintf(w, "Resume: пропущено %d таблиц (чекпоинты прогона %s)\n", r.Skipped, r.ResumeFrom)
+	}
+	if r.BreakerTripped {
+		fmt.Fprintln(w, "Circuit breaker: источник взят на паузу (5 мин, п. 13.2) — догнать можно флагом -resume")
+	}
 	fmt.Fprintf(w, "Вердикты: %d (ожидают ревью: %d)\n", r.Verdicts, r.Pending)
 	fmt.Fprintf(w, "По слоям: %s\n", joinSorted(r.ByLayer))
 	fmt.Fprintf(w, "По лейблам: %s\n", joinSorted(r.ByLabel))
@@ -211,6 +231,13 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 		ByLayer:   map[string]int{},
 		ByStatus:  map[string]int{},
 	}
+	// Circuit breaker (п. 13.2): источник на паузе — прогон не начинается
+	// (строка scans не создаётся; до конца паузы — отказ с указанием until).
+	if e.cfg.Breaker != nil {
+		if err := e.cfg.Breaker.PausedErr(sourceName, e.nowFn()); err != nil {
+			return nil, err
+		}
+	}
 	if err := e.st.SaveScan(ctx, &store.Scan{
 		ID: scanID, SourceName: sourceName, Profile: profile,
 		Status: "running", StartedAt: rep.StartedAt,
@@ -220,9 +247,11 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 	observe.Default.IncrScanStarted() // п. 17: счётчик процесса
 	// Аудит старта скана (ADR-0013, п. 14.2): запись обязательна — ошибка
 	// аудита отменяет скан (действие без аудита не считается совершённым).
-	if err := e.st.AppendAudit(ctx, []audit.Event{e.scanEvent(scanID, "scan_start", map[string]any{
-		"source": sourceName, "profile": profile,
-	})}); err != nil {
+	startDetails := map[string]any{"source": sourceName, "profile": profile}
+	if e.cfg.ResumeFrom != "" {
+		startDetails["resume_from"] = e.cfg.ResumeFrom
+	}
+	if err := e.st.AppendAudit(ctx, []audit.Event{e.scanEvent(scanID, "scan_start", startDetails)}); err != nil {
 		_ = e.st.FinishScan(ctx, scanID, "failed", "{}", e.nowFn())
 		return nil, fmt.Errorf("аудит старта скана: %w", err)
 	}
@@ -244,7 +273,26 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 	}
 	rep.TablesTotal = len(tables)
 
+	// Resume (п. 13.2): пропускаем таблицы, уже done в чекпоинт-прогоне.
+	if e.cfg.ResumeFrom != "" {
+		done, err := e.st.DoneTables(ctx, e.cfg.ResumeFrom)
+		if err != nil {
+			_ = e.finish(ctx, rep, "failed")
+			return rep, fmt.Errorf("resume: чекпоинты прогона %s: %w", e.cfg.ResumeFrom, err)
+		}
+		remaining := tables[:0]
+		for _, t := range tables {
+			if !done[t.Name] {
+				remaining = append(remaining, t)
+			}
+		}
+		rep.Skipped = len(tables) - len(remaining)
+		rep.ResumeFrom = e.cfg.ResumeFrom
+		tables = remaining
+	}
+
 	interrupted := false
+	consecutiveOverload := 0
 	for _, t := range tables {
 		// Мягкая остановка (п. 11.2 stop, п. 13): отмена ctx между таблицами —
 		// прогон фиксируется interrupted с чекпоинтами обработанных таблиц.
@@ -252,17 +300,35 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 			interrupted = true
 			break
 		}
-		if err := e.scanTable(ctx, conn, scanID, t, rep); err != nil {
-			// ошибка уже записана в scan_tables; продолжаем остальные таблицы
+		if err := e.scanTableRetry(ctx, conn, scanID, t, rep); err != nil {
+			// ошибка уже записана в scan_tables (с причиной); продолжаем прочие
 			rep.TablesFailed++
+			if connector.ClassifyFailure(err) == connector.ReasonOverload {
+				consecutiveOverload++
+			} else {
+				consecutiveOverload = 0
+			}
+			// Circuit breaker (п. 13.2): серия overload-ошибок → пауза источника.
+			if e.cfg.Breaker != nil && consecutiveOverload >= breakerConsecutiveFails {
+				until := e.cfg.Breaker.Trip(sourceName, e.nowFn(), breakerPause)
+				rep.BreakerTripped = true
+				// аудит паузы (п. 14.2): best effort — прогон уже падает.
+				_ = e.st.AppendAudit(context.WithoutCancel(ctx), []audit.Event{e.scanEvent(scanID, "source_paused", map[string]any{
+					"source": sourceName, "consecutive_overload_failures": consecutiveOverload,
+					"pause_min":    breakerPause.Minutes(),
+					"paused_until": until.UTC().Format(time.RFC3339),
+				})})
+				break
+			}
 		} else {
 			rep.TablesDone++
+			consecutiveOverload = 0
 		}
 	}
 
 	status := "done"
 	if rep.TablesFailed > 0 {
-		status = "partial"
+		status = "partial" // в т.ч. по circuit breaker (п. 13.2) и обычные ошибки
 	}
 	if interrupted {
 		status = "interrupted" // stop приоритетнее done/partial
@@ -305,6 +371,9 @@ func (e *Engine) finish(ctx context.Context, rep *Report, status string) error {
 		"cluster_propagated": rep.ClusterPropagated,
 		"llm_errors":         rep.LLMErrors, "tokens_in": rep.TokensIn, "tokens_out": rep.TokensOut,
 		"cost_usd": rep.CostUSD,
+		// Инкремент 8 (п. 13.2): следы resume и circuit breaker.
+		"tables_skipped": rep.Skipped, "resume_from": rep.ResumeFrom,
+		"breaker_tripped": rep.BreakerTripped,
 	})
 	_ = e.st.FinishScan(ctx, rep.ScanID, status, string(stats), rep.FinishedAt)
 	return e.st.AppendAudit(ctx, []audit.Event{e.scanEvent(rep.ScanID, "scan_finish", map[string]any{
@@ -352,12 +421,30 @@ func (e *Engine) aggregate(ctx context.Context, rep *Report) error {
 	return nil
 }
 
+// scanTableRetry оборачивает scanTable повторами (blueprint п. 13.2):
+// retry — только на retryable-ошибки драйвера (перегрузка, таймаут,
+// потеря лидерства), всего до 3 попыток с нарастающей паузой; прочие
+// ошибки сразу фиксируют таблицу failed.
+func (e *Engine) scanTableRetry(ctx context.Context, conn connector.Connector, scanID string, t connector.TableRef, rep *Report) error {
+	for attempt := 0; ; attempt++ {
+		err := e.scanTable(ctx, conn, scanID, t, rep)
+		if err == nil || !connector.IsRetryable(err) || attempt >= len(retryBackoff) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(retryBackoff[attempt]):
+		}
+	}
+}
+
 func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID string, t connector.TableRef, rep *Report) error {
 	e.takeCalls() // сброс буфера: вызовы failed-таблицы не должны попасть в чужой коммит (п. 13)
 	e.takeEvents()
 	cols, err := conn.GetSchema(ctx, t)
 	if err != nil {
-		_ = e.st.MarkTable(ctx, scanID, t.Name, 0, "failed", err.Error())
+		_ = e.st.MarkTable(ctx, scanID, t.Name, 0, "failed", err.Error(), string(connector.ClassifyFailure(err)))
 		return err
 	}
 	var rowCount int64
@@ -369,7 +456,7 @@ func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID
 		v, err := e.classifyColumn(ctx, conn, scanID, t, col)
 		if err != nil {
 			// обрыв стрима сэмпла → таблица failed, чекпоинт (п. 6)
-			_ = e.st.MarkTable(ctx, scanID, t.Name, rowCount, "failed", err.Error())
+			_ = e.st.MarkTable(ctx, scanID, t.Name, rowCount, "failed", err.Error(), string(connector.ClassifyFailure(err)))
 			return err
 		}
 		vs = append(vs, v)
@@ -377,10 +464,10 @@ func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID
 	// вердикты, учётные записи вызовов и аудит таблицы — одна транзакция
 	// (п. 13: либо всё, либо откат; ADR-0013: действие без аудита не совершено)
 	if err := e.st.SaveVerdictsWithCalls(ctx, vs, e.takeCalls(), e.takeEvents()); err != nil {
-		_ = e.st.MarkTable(ctx, scanID, t.Name, rowCount, "failed", err.Error())
+		_ = e.st.MarkTable(ctx, scanID, t.Name, rowCount, "failed", err.Error(), string(connector.ClassifyFailure(err)))
 		return err
 	}
-	return e.st.MarkTable(ctx, scanID, t.Name, rowCount, "done", "")
+	return e.st.MarkTable(ctx, scanID, t.Name, rowCount, "done", "", "")
 }
 
 func (e *Engine) classifyColumn(ctx context.Context, conn connector.Connector, scanID string, t connector.TableRef, col connector.Column) (verdict.Verdict, error) {

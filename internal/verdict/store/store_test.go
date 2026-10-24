@@ -108,15 +108,88 @@ func TestMarkTableAndFailedTables(t *testing.T) {
 	st := openTest(t)
 	ctx := context.Background()
 	mustSaveScan(t, st, "s1")
-	if err := st.MarkTable(ctx, "s1", "users", 100, "done", ""); err != nil {
+	if err := st.MarkTable(ctx, "s1", "users", 100, "done", "", ""); err != nil {
 		t.Fatalf("MarkTable: %v", err)
 	}
-	if err := st.MarkTable(ctx, "s1", "events", 0, "failed", "нет прав"); err != nil {
+	if err := st.MarkTable(ctx, "s1", "events", 0, "failed", "нет прав", ""); err != nil {
 		t.Fatalf("MarkTable failed: %v", err)
 	}
 	failed, err := st.FailedTables(ctx, "s1")
 	if err != nil || len(failed) != 1 || failed[0] != "events: нет прав" {
 		t.Fatalf("FailedTables: %v %v", failed, err)
+	}
+}
+
+func TestMarkTableReason(t *testing.T) {
+	st := openTest(t)
+	ctx := context.Background()
+	mustSaveScan(t, st, "s1")
+	if err := st.MarkTable(ctx, "s1", "orders", 10, "failed", "timeout", "source_overload"); err != nil {
+		t.Fatalf("MarkTable с reason: %v", err)
+	}
+	reason, err := tableReason(t, st, "s1", "orders")
+	if err != nil || reason != "source_overload" {
+		t.Fatalf("reason: %q %v, ожидалось source_overload", reason, err)
+	}
+	// UPSERT перезаписывает reason вместе со статусом.
+	if err := st.MarkTable(ctx, "s1", "orders", 10, "done", "", ""); err != nil {
+		t.Fatalf("MarkTable повторный: %v", err)
+	}
+	reason, err = tableReason(t, st, "s1", "orders")
+	if err != nil || reason != "" {
+		t.Fatalf("reason после done: %q %v, ожидалось пусто", reason, err)
+	}
+}
+
+func tableReason(t *testing.T, st *Store, scanID, table string) (string, error) {
+	t.Helper()
+	var reason string
+	err := st.db.QueryRowContext(context.Background(),
+		`SELECT reason FROM scan_tables WHERE scan_id = ? AND table_name = ?`, scanID, table).Scan(&reason)
+	return reason, err
+}
+
+func TestDoneTablesAndLastCheckpointScan(t *testing.T) {
+	st := openTest(t)
+	ctx := context.Background()
+	// Чекпоинт-прогон: users done, events failed.
+	mustSaveScan(t, st, "chk")
+	markStatus(t, st, "chk", "users", "done")
+	markStatus(t, st, "chk", "events", "failed")
+	mustFinish(t, st, "chk", "partial")
+
+	mustSaveScan(t, st, "old")
+	markStatus(t, st, "old", "a", "done")
+	mustFinish(t, st, "old", "done") // done — не кандидат на resume
+
+	done, err := st.DoneTables(ctx, "chk")
+	if err != nil || len(done) != 1 || !done["users"] {
+		t.Fatalf("DoneTables: %v %v", done, err)
+	}
+
+	got, err := st.LastCheckpointScan(ctx, "x") // mustSaveScan пишет source "x"
+	if err != nil {
+		t.Fatalf("LastCheckpointScan: %v", err)
+	}
+	if got == nil || got.ID != "chk" {
+		t.Fatalf("LastCheckpointScan: %+v, ожидался chk", got)
+	}
+	if _, err := st.LastCheckpointScan(ctx, "нет-такого-источника"); err != nil {
+		t.Fatalf("LastCheckpointScan пустого источника: %v", err)
+	}
+}
+
+func markStatus(t *testing.T, st *Store, scanID, table, status string) {
+	t.Helper()
+	if err := st.MarkTable(context.Background(), scanID, table, 0, status, "", ""); err != nil {
+		t.Fatalf("MarkTable %s/%s: %v", scanID, table, err)
+	}
+}
+
+func mustFinish(t *testing.T, st *Store, id, status string) {
+	t.Helper()
+	if err := st.FinishScan(context.Background(), id, status, "{}", time.Now().UTC()); err != nil {
+		t.Fatalf("FinishScan %s: %v", id, err)
 	}
 }
 
