@@ -1,0 +1,17 @@
+# Override эталонного smoke-контура (blueprint п. 15, DoD п. 22) для прогона
+# на тестовом стенде 192.168.31.113. Причина: CPU стенда (i7-6700, VM) без
+# флагов AVX → MongoDB ≥5.0 не стартует (SIGILL), образ mongo:7 заменён на
+# mongo:4.4 (последняя линия без требования AVX). В образе mongo:4.4 нет
+# mongosh — healthcheck через легаси-шелл mongo.
+#
+# Прогон (зелёный smoke = код 0 и вердикты в UI на 127.0.0.1:8080):
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.stand.yml \
+#     --profile smoke run --rm --build smoke-scan
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.stand.yml up -d app
+# Очистка: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.stand.yml down -v
+# Протокол прогона: docs/validation/2026-10-24-smoke-stand.md.
+services:
+  mongo:
+    image: mongo:4.4
+    healthcheck:
+      test: ["CMD", "mongo", "--quiet", "-u", "zond", "-p", "zond-smoke", "--authenticationDatabase", "admin", "--eval", "db.runCommand({ping:1})"]

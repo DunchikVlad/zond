@@ -59,9 +59,15 @@ services:
 
   # Разовый quick-скан до первых вердиктов (DoD). Запуск: make smoke
   # (compose --profile smoke run). БД общая с app — вердикты видны в UI.
+  # build — тот же контекст/ Dockerfile, что у app: образ один (layer cache),
+  # иначе run --build smoke-scan пытается pull zond:smoke из несуществующего
+  # репозитория (первый реальный прогон, стенд 2026-10-24).
   smoke-scan:
     image: zond:smoke
     profiles: ["smoke"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
     depends_on:
       clickhouse:
         condition: service_healthy
