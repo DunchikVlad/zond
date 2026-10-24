@@ -221,3 +221,47 @@ sources:
 		t.Errorf("scan_window без поля должен быть пустым, %q", plain.ScanWindow)
 	}
 }
+
+// --- audit.sink (S8-3, п. 14.2) ---
+
+func TestConnectionsAuditSinkValidation(t *testing.T) {
+	setValidEnv(t)
+	cases := []struct {
+		name    string
+		sink    string
+		wantErr string // пусто — валидно
+	}{
+		{"без блока", "", ""},
+		{"json-tcp", `sink: {kind: json-tcp, address: "siem:5140"}`, ""},
+		{"syslog udp default", `sink: {kind: syslog, address: "siem:514"}`, ""},
+		{"syslog tcp", `sink: {kind: syslog, address: "siem:514", proto: tcp}`, ""},
+		{"kind без address", `sink: {kind: json-tcp}`, "audit.sink"},
+		{"address без kind", `sink: {address: "siem:5140"}`, "audit.sink"},
+		{"неизвестный kind", `sink: {kind: kafka, address: "siem:5140"}`, "json-tcp|syslog"},
+		{"proto не udp/tcp", `sink: {kind: syslog, address: "siem:514", proto: sctp}`, "udp|tcp"},
+		{"proto при json-tcp", `sink: {kind: json-tcp, address: "siem:5140", proto: udp}`, "proto"},
+		{"address не host:port", `sink: {kind: json-tcp, address: "siem"}`, "host:port"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := validDir(t)
+			yaml := `version: "1"
+sources: []
+`
+			if c.sink != "" {
+				yaml += "audit:\n  " + c.sink + "\n"
+			}
+			writeFile(t, dir, "connections.yaml", yaml)
+			_, err := LoadConnections(filepath.Join(dir, "connections.yaml"))
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("валидный sink отклонён: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("ожидалась ошибка %q: %v", c.wantErr, err)
+			}
+		})
+	}
+}

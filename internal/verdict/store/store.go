@@ -61,6 +61,12 @@ func Open(path string) (*Store, error) {
 // Close закрывает БД.
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB — сырое соединение для инфраструктурных потребителей, работающих
+// вне доменного API store (SIEM-sink очередь, S8-3, п. 14.2). Один писатель
+// (SetMaxOpenConns(1)) — sink лишь читает очередь и UPDATE-ит её
+// (delivered_at/attempts), цепочку audit_log не трогает.
+func (s *Store) DB() *sql.DB { return s.db }
+
 // Ping проверяет доступность БД (readiness API, п. 11.2 /api/ready).
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 

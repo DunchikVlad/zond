@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -125,6 +126,69 @@ type Connections struct {
 	// Vault — секреты подключений из HashiCorp Vault (ADR-0012, п. 12.1).
 	// Выключен или блок отсутствует — прежний режим ${ENV}.
 	Vault Vault `yaml:"vault"`
+	// Audit — внешний sink аудит-журнала в SIEM (опция, п. 14.2: sink
+	// `audit.sink`; потеря событий недопустима — локальная очередь с
+	// повторами, миграция 0009). Пусто — только локальный журнал.
+	Audit AuditSink `yaml:"audit"`
+}
+
+// SinkKind — тип SIEM-sink (п. 14.2): json-tcp (NDJSON поверх TCP) или
+// syslog (CEF-подобная строка, UDP/TCP; по умолчанию UDP).
+type SinkKind string
+
+const (
+	SinkJSONTCP SinkKind = "json-tcp"
+	SinkSyslog  SinkKind = "syslog"
+)
+
+// SinkProto — транспорт syslog: udp (default) | tcp.
+type SinkProto string
+
+const (
+	SinkProtoUDP SinkProto = "udp"
+	SinkProtoTCP SinkProto = "tcp"
+)
+
+// SinkConfig — адрес sink в connections.yaml (audit.sink, п. 14.2).
+// Валидация — при загрузке (fail-fast, ADR-0009).
+type SinkConfig struct {
+	Kind    SinkKind  `yaml:"kind"`    // json-tcp | syslog
+	Address string    `yaml:"address"` // host:port SIEM
+	Proto   SinkProto `yaml:"proto"`   // syslog: udp (default) | tcp
+}
+
+// Validate — fail-fast схема audit.sink (п. 14.2): пустой блок = выключено;
+// задан — kind/address обязательны, proto — только для syslog.
+func (s *SinkConfig) Validate() error {
+	if s.Kind == "" && s.Address == "" {
+		return nil // sink не настроен — локальный журнал (опция п. 14.2)
+	}
+	if s.Kind == "" || s.Address == "" {
+		return fmt.Errorf("audit.sink: kind и address обязательны вместе (п. 14.2)")
+	}
+	switch s.Kind {
+	case SinkJSONTCP:
+		if s.Proto != "" {
+			return fmt.Errorf("audit.sink: proto применим только к syslog (п. 14.2)")
+		}
+	case SinkSyslog:
+		switch s.Proto {
+		case "", SinkProtoUDP, SinkProtoTCP: // default udp
+		default:
+			return fmt.Errorf("audit.sink: proto %q не udp|tcp", s.Proto)
+		}
+	default:
+		return fmt.Errorf("audit.sink: kind %q не json-tcp|syslog", s.Kind)
+	}
+	if _, _, err := net.SplitHostPort(s.Address); err != nil {
+		return fmt.Errorf("audit.sink: address %q не host:port: %w", s.Address, err)
+	}
+	return nil
+}
+
+// AuditSink — обёртка блока audit: connections.yaml (п. 14.2).
+type AuditSink struct {
+	Sink SinkConfig `yaml:"sink"`
 }
 
 // Vault — опциональный блок secrets.Resolver (ADR-0012): address, способ
@@ -329,6 +393,9 @@ func (c *Connections) Validate() error {
 	}
 	if c.Backup.Schedule != "" && c.Backup.Dir == "" {
 		errs = append(errs, errors.New("backup: dir обязателен при заданном schedule (п. 15.2)"))
+	}
+	if err := c.Audit.Sink.Validate(); err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

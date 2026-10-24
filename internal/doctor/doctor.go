@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/DunchikVlad/zond/internal/agentproxy"
+	"github.com/DunchikVlad/zond/internal/audit"
 	"github.com/DunchikVlad/zond/internal/config"
 	"github.com/DunchikVlad/zond/internal/connector"
 	"github.com/DunchikVlad/zond/internal/secrets"
@@ -113,7 +114,11 @@ func Run(ctx context.Context, b *config.Bundle, dbPath string, opts Options) *Re
 		now = time.Now()
 	}
 	checkDisk(rep, dbPath)
-	checkStore(rep, dbPath)
+	sinkAddr := ""
+	if b != nil {
+		sinkAddr = b.Connections.Audit.Sink.Address
+	}
+	checkStoreWithSink(rep, dbPath, sinkAddr)
 	if b == nil {
 		rep.add("config.load", "configs", StatusFail, "конфигурация не загружена — зависимые проверки пропущены")
 		return rep
@@ -202,7 +207,19 @@ func checkDisk(rep *Report, dbPath string) {
 }
 
 // checkStore — store открывается и hash-chain аудита цел (п. 14.2).
+// Sink-backlog (S8-3): при настроенном audit.sink — сколько событий
+// журнала ждут доставки в SIEM (закладка audit_sink_state, миграция 0009).
+// Большой backlog — не FAIL (sink — опция, доставка догонит), но WARN в
+// детали — оператор должен видеть отставание.
 func checkStore(rep *Report, dbPath string) {
+	checkStoreWithSink(rep, dbPath, "")
+}
+
+// checkStoreWithSink — checkStore + (при sinkAddr != "") строка backlog
+// закладки SIEM-sink. Отдельная сигнатура — doctor.Run получает конфиг
+// позже (b), а store открывается до развязки источников; вызыватель
+// (Run) передаёт адрес sink напрямую.
+func checkStoreWithSink(rep *Report, dbPath, sinkAddr string) {
 	st, err := store.Open(dbPath)
 	if err != nil {
 		rep.add("store.open", dbPath, StatusFail, err.Error())
@@ -220,6 +237,19 @@ func checkStore(rep *Report, dbPath string) {
 		return
 	}
 	rep.add("audit.chain", dbPath, StatusOK, fmt.Sprintf("целостность подтверждена (%d записей)", ver.Checked))
+	if sinkAddr != "" {
+		pending, err := audit.SinkPending(context.Background(), st.DB())
+		if err != nil {
+			rep.add("audit.sink", sinkAddr, StatusFail, "закладка sink: "+err.Error())
+			return
+		}
+		if pending > 0 {
+			rep.add("audit.sink", sinkAddr, StatusWarn,
+				fmt.Sprintf("backlog: %d событий ждут доставки в SIEM (п. 14.2)", pending))
+			return
+		}
+		rep.add("audit.sink", sinkAddr, StatusOK, "backlog пуст (п. 14.2)")
+	}
 }
 
 // checkSources — доступность каждого источника: конструктор + Ping +

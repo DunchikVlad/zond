@@ -351,6 +351,43 @@ func findSource(c *config.Connections, name string) (*config.Source, error) {
 	return nil, fmt.Errorf("источник %q не найден в connections.yaml", name)
 }
 
+// auditSinkConfig — конверт connections.yaml audit.sink в контракт
+// воркера (internal/audit не тянет config, п. 14.2). Пустой блок → нулевой
+// конфиг → sink выключен (NewSink вернёт nil).
+func auditSinkConfig(c config.SinkConfig) audit.SinkConfig {
+	return audit.SinkConfig{
+		Kind:    audit.SinkKind(c.Kind),
+		Address: c.Address,
+		Proto:   string(c.Proto),
+	}
+}
+
+// sinkLoop — цикл воркера SIEM-sink (S8-3, п. 14.2): Pump по таймеру 2 с;
+// при ошибке уровня журнала (недоступна БД/закладка) — пауза 30 с между
+// циклами. Недоступность самого sink не ошибка Pump: закладка не двигается,
+// следующий цикл повторит (потеря исключена — очередь = журнал). Остановка
+// — по ctx serve; in-flight Pump дожидается сам.
+func sinkLoop(ctx context.Context, sink *audit.Sink) {
+	const (
+		tick    = 2 * time.Second
+		backoff = 30 * time.Second
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(tick):
+		}
+		if _, err := sink.Pump(ctx); err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+		}
+	}
+}
+
 // llmComposite — композиция прокси агентов реестра под интерфейс движка:
 // Classify — прокси основного агента (agents[0]), Verify — прокси агента
 // escalate_to, если задан, иначе тот же прокси (blueprint п. 7 правило 4).
@@ -755,6 +792,18 @@ func runServe(args []string) int {
 		}
 		defer sched.Stop()
 		log.Info("serve: планировщик запущен")
+	}
+
+	// SIEM-sink (S8-3, п. 14.2): внешний sink аудит-журнала (опция
+	// `audit.sink` в connections.yaml). Очередь — сам журнал (append-only);
+	// воркер держит закладку audit_sink_state и двигает её только за
+	// доставленное: потеря событий недопустима. Недоступность sink не
+	// роняет запись аудита (fail-closed по журналу, не по sink).
+	sink := audit.NewSink(st.DB(), auditSinkConfig(b.Connections.Audit.Sink), log)
+	if sink.Enabled() {
+		go sinkLoop(serveCtx, sink)
+		log.Info("serve: SIEM-sink запущен", "kind", sink.Kind(),
+			"address", b.Connections.Audit.Sink.Address)
 	}
 
 	httpSrv := &http.Server{

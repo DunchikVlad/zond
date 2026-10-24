@@ -14,6 +14,9 @@ import (
 // цикла скана: start/finish — вне транзакций вердиктов). Ошибка записи
 // аудита = ошибка операции (fail-closed: действие без аудита не считается
 // совершённым, п. 14.2 «все действия журналируются»).
+//
+// SIEM-sink (S8-3) не требует пометок при записи: его очередь — сам журнал,
+// воркер читает по закладке audit_sink_state (миграция 0009).
 func (s *Store) AppendAudit(ctx context.Context, events []audit.Event) error {
 	if len(events) == 0 {
 		return nil

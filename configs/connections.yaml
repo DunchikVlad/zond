@@ -61,3 +61,14 @@ sso:
 #     - ref: mongo-prod
 #       path: kv/data/zond/mongo-prod           # kv-v2: ключ с готовым URI
 #       key: uri
+
+# Внешний sink аудит-журнала в SIEM (опция, blueprint п. 14.2, ADR-0013).
+# Очередь — сам append-only журнал; воркер держит закладку (миграция 0009)
+# и двигает её только за доставленное: потеря событий недопустима. При
+# недоступности sink — повторная отправка (backoff), запись аудита не
+# роняется. Не задано — только локальный журнал.
+# audit:
+#   sink:
+#     kind: json-tcp            # json-tcp (NDJSON по TCP) | syslog (CEF)
+#     address: "siem.example:5140"
+#     # proto: udp              # только syslog: udp (default) | tcp
