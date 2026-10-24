@@ -15,6 +15,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DunchikVlad/zond/internal/agentproxy"
@@ -69,6 +70,14 @@ type Config struct {
 	// ResumeFrom — id прогона (partial/interrupted), чьи done-таблицы
 	// пропускаются (--resume, п. 13.2).
 	ResumeFrom string
+
+	// S8-2: per-source лимиты источника (п. 13.2, max_concurrent_tables /
+	// query_timeout_s из connections.yaml). MaxTables <= 0 — последовательная
+	// обработка (прежний путь); >0 — таблицы обрабатывают до MaxTables
+	// воркеров через TableGate. QueryTimeout <= 0 — запросы к БД без
+	// дополнительного дедлайна (поведение до инкремента).
+	MaxTables    int
+	QueryTimeout time.Duration
 }
 
 // retryBackoff — паузы между повторами retryable-таблицы (п. 13.2):
@@ -90,6 +99,12 @@ type LLMClassifier interface {
 }
 
 // Engine — движок сканирования одного источника.
+//
+// Потокобезопасность (S8-2, п. 13.2): при MaxTables>0 таблицы обрабатывают
+// несколько воркеров одновременно — разделяемое состояние прогона
+// (кластерер, буферы вызовов/событий, счётчики, кэш прайса, бюджет)
+// защищено мьютексами; последовательный путь (MaxTables<=0) работает без
+// конкуренции, мьютексы прозрачны.
 type Engine struct {
 	st        *store.Store
 	meta      *meta.Analyzer
@@ -98,21 +113,20 @@ type Engine struct {
 	llmID     LLMIdentity   // идентичность для agent_calls (п. 10.6)
 	cfg       Config
 	nowFn     func() time.Time
+	cluMu     sync.Mutex
 	clusterer *cluster.Clusterer // на скан (п. 7.6); nil — кластеризация выключена
-	stats     scanStats          // счётчики экономики текущего прогона
 
-	// Инкремент 4в: буфер учётных записей вызовов текущей таблицы (п. 10.6)
-	// и накопленная стоимость/бюджет (п. 10.4). Сбрасываются после коммита
-	// таблицы вместе с вердиктами (атомарность п. 13).
-	calls          []store.AgentCall
+	statsMu sync.Mutex
+	stats   scanStats // счётчики экономики текущего прогона
+
+	// Инкремент 4в: накопленная стоимость/бюджет скана (п. 10.4) и ленивый
+	// кэш прайс-листа model_prices. Под мьютексом (S8-2: параллельные
+	// воркеры п. 13.2). Буферы вызовов/событий таблицы — локальные
+	// (tableState, п. 13).
+	callsMu        sync.Mutex
 	cost           float64
 	budgetExceeded bool
-	prices         map[string]modelPrice // ленивый кэш прайс-листа model_prices
-
-	// Инкремент 5а: буфер аудит-событий таблицы (ADR-0013): пишется в той же
-	// транзакции, что вердикты и вызовы (п. 13/14.2). 1:1 с calls (п. 14.2:
-	// каждый вызов агента — событие со ссылкой на agent_calls).
-	events []audit.Event
+	prices         map[string]modelPrice
 }
 
 // modelPrice — цена модели за 1M токенов (п. 11.1) из кэша движка.
@@ -154,9 +168,11 @@ type Report struct {
 	TablesTotal       int
 	TablesDone        int
 	TablesFailed      int
-	Skipped           int    // таблицы, пропущенные по чекпоинтам resume (п. 13.2)
-	ResumeFrom        string // id прогона-чекпоинта (--resume; "" — полный прогон)
-	BreakerTripped    bool   // circuit breaker остановил прогон (п. 13.2)
+	Skipped           int           // таблицы, пропущенные по чекпоинтам resume (п. 13.2)
+	ResumeFrom        string        // id прогона-чекпоинта (--resume; "" — полный прогон)
+	BreakerTripped    bool          // circuit breaker остановил прогон (п. 13.2)
+	MaxTables         int           // применённый лимит таблиц (п. 13.2, S8-2)
+	QueryTimeout      time.Duration // применённый дедлайн запроса к БД (п. 13.2, S8-2)
 	Verdicts          int
 	Pending           int
 	ByLabel           map[string]int
@@ -177,6 +193,11 @@ func (r *Report) Text(w io.Writer) {
 	fmt.Fprintf(w, "\n=== Скан %s — источник %s (профиль %s) ===\n", r.ScanID, r.Source, r.Profile)
 	fmt.Fprintf(w, "Статус: %s   Длительность: %s\n", r.Status, r.FinishedAt.Sub(r.StartedAt).Round(time.Millisecond))
 	fmt.Fprintf(w, "Таблицы: %d всего, %d обработано, %d с ошибками\n", r.TablesTotal, r.TablesDone, r.TablesFailed)
+	if r.MaxTables > 0 || r.QueryTimeout > 0 {
+		// S8-2 (п. 13.2): применённые лимиты источника — видно в отчёте.
+		fmt.Fprintf(w, "Лимиты источника (п. 13.2): max_concurrent_tables=%d, query_timeout=%s\n",
+			r.MaxTables, r.QueryTimeout.Round(time.Second))
+	}
 	if r.ResumeFrom != "" {
 		fmt.Fprintf(w, "Resume: пропущено %d таблиц (чекпоинты прогона %s)\n", r.Skipped, r.ResumeFrom)
 	}
@@ -230,6 +251,9 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 		ByLabel:   map[string]int{},
 		ByLayer:   map[string]int{},
 		ByStatus:  map[string]int{},
+		// S8-2 (п. 13.2): применённые лимиты источника — в отчёте.
+		MaxTables:    e.cfg.MaxTables,
+		QueryTimeout: e.cfg.QueryTimeout,
 	}
 	// Circuit breaker (п. 13.2): источник на паузе — прогон не начинается
 	// (строка scans не создаётся; до конца паузы — отказ с указанием until).
@@ -256,14 +280,21 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 		return nil, fmt.Errorf("аудит старта скана: %w", err)
 	}
 	if e.cfg.Clustering {
+		e.cluMu.Lock()
 		e.clusterer = cluster.New(e.cfg.ClusterSimilarity, e.cfg.ClusterMaxSize)
+		e.cluMu.Unlock()
 	} else {
+		e.cluMu.Lock()
 		e.clusterer = nil
+		e.cluMu.Unlock()
 	}
+	e.statsMu.Lock()
 	e.stats = scanStats{}
-	e.calls = nil
+	e.statsMu.Unlock()
+	e.callsMu.Lock()
 	e.cost = 0
 	e.budgetExceeded = false
+	e.callsMu.Unlock()
 
 	tables, err := conn.ListTables(ctx)
 	if err != nil {
@@ -292,38 +323,16 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 	}
 
 	interrupted := false
-	consecutiveOverload := 0
-	for _, t := range tables {
-		// Мягкая остановка (п. 11.2 stop, п. 13): отмена ctx между таблицами —
-		// прогон фиксируется interrupted с чекпоинтами обработанных таблиц.
-		if ctx.Err() != nil {
-			interrupted = true
-			break
-		}
-		if err := e.scanTableRetry(ctx, conn, scanID, t, rep); err != nil {
-			// ошибка уже записана в scan_tables (с причиной); продолжаем прочие
-			rep.TablesFailed++
-			if connector.ClassifyFailure(err) == connector.ReasonOverload {
-				consecutiveOverload++
-			} else {
-				consecutiveOverload = 0
-			}
-			// Circuit breaker (п. 13.2): серия overload-ошибок → пауза источника.
-			if e.cfg.Breaker != nil && consecutiveOverload >= breakerConsecutiveFails {
-				until := e.cfg.Breaker.Trip(sourceName, e.nowFn(), breakerPause)
-				rep.BreakerTripped = true
-				// аудит паузы (п. 14.2): best effort — прогон уже падает.
-				_ = e.st.AppendAudit(context.WithoutCancel(ctx), []audit.Event{e.scanEvent(scanID, "source_paused", map[string]any{
-					"source": sourceName, "consecutive_overload_failures": consecutiveOverload,
-					"pause_min":    breakerPause.Minutes(),
-					"paused_until": until.UTC().Format(time.RFC3339),
-				})})
-				break
-			}
-		} else {
-			rep.TablesDone++
-			consecutiveOverload = 0
-		}
+	if e.cfg.MaxTables > 0 {
+		// S8-2 (п. 13.2): max_concurrent_tables источника — пул воркеров,
+		// gate ёмкостью MaxTables; итог и серия overload — как в
+		// последовательном пути (в порядке ListTables). Серия на выходе не
+		// используется: breaker фиксирует паузу при сработке (Trip + аудит
+		// source_paused в tripBreakerIfNeeded), BreakerTripped — в отчёте.
+		_, interrupted = e.scanTablesParallel(ctx, conn, scanID, tables, rep)
+	} else {
+		e.scanTablesSequential(ctx, conn, scanID, tables, rep)
+		interrupted = ctx.Err() != nil
 	}
 
 	status := "done"
@@ -333,19 +342,20 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 	if interrupted {
 		status = "interrupted" // stop приоритетнее done/partial
 	}
-	if e.budgetExceeded {
+	if e.budgetHit() {
 		status = "budget_exceeded" // budget-стоп приоритетнее done/partial (п. 10.4)
 	}
-	rep.LLMCalls = e.stats.llmCalls
-	rep.CacheHits = e.stats.cacheHits
-	rep.ClusterPropagated = e.stats.propagated
-	rep.LLMErrors = e.stats.llmErrors
-	rep.TokensIn = e.stats.tokensIn
-	rep.TokensOut = e.stats.tokensOut
-	rep.CostUSD = e.cost
+	st := e.statsSnapshot()
+	rep.LLMCalls = st.llmCalls
+	rep.CacheHits = st.cacheHits
+	rep.ClusterPropagated = st.propagated
+	rep.LLMErrors = st.llmErrors
+	rep.TokensIn = st.tokensIn
+	rep.TokensOut = st.tokensOut
 	// Финализация (агрегаты, stats_json, аудит scan_finish) идёт даже при
 	// отменённом ctx — WithoutCancel отвязывает от отмены, иначе interrupted-
 	// прогон останется «вечным» running (п. 13, п. 11.2 stop).
+	rep.CostUSD = e.costSnap()
 	fin := context.WithoutCancel(ctx)
 	if err := e.aggregate(fin, rep); err != nil {
 		return rep, err
@@ -421,13 +431,170 @@ func (e *Engine) aggregate(ctx context.Context, rep *Report) error {
 	return nil
 }
 
+// scanTablesSequential — цикл таблиц без параллелизма (MaxTables<=0):
+// мягкая остановка между таблицами (ctx), retry + breaker по серии
+// overload (п. 13.2). Возвращает длину серии на выходе из цикла (breaker
+// мог сработать — в отчёте флаг BreakerTripped).
+func (e *Engine) scanTablesSequential(ctx context.Context, conn connector.Connector, scanID string, tables []connector.TableRef, rep *Report) int {
+	consecutiveOverload := 0
+	for _, t := range tables {
+		// Мягкая остановка (п. 11.2 stop, п. 13): отмена ctx между таблицами —
+		// прогон фиксируется interrupted с чекпоинтами обработанных таблиц.
+		if ctx.Err() != nil {
+			break
+		}
+		if err := e.scanTableRetry(ctx, conn, scanID, t, rep); err != nil {
+			// ошибка уже записана в scan_tables (с причиной); продолжаем прочие
+			rep.TablesFailed++
+			if connector.ClassifyFailure(err) == connector.ReasonOverload {
+				consecutiveOverload++
+			} else {
+				consecutiveOverload = 0
+			}
+			// Circuit breaker (п. 13.2): серия overload-ошибок → пауза источника.
+			if e.tripBreakerIfNeeded(ctx, scanID, rep, consecutiveOverload) {
+				break
+			}
+		} else {
+			rep.TablesDone++
+			consecutiveOverload = 0
+		}
+	}
+	return consecutiveOverload
+}
+
+// scanTablesParallel — пул из MaxTables воркеров (п. 13.2, gate ёмкостью
+// max_concurrent_tables источника). Результаты собираются в порядке
+// ListTables: серия breaker'а (5 подряд overload) и итоговые счётчики
+// совпадают с последовательным путём; при сработке breaker'а обработка
+// останавливается на той же таблице, что и в sequential-режиме. Возвращает
+// серию overload на выходе и признак мягкой остановки (ctx отменён —
+// прогон фиксируется interrupted; начатые таблицы коммитятся, п. 13).
+func (e *Engine) scanTablesParallel(ctx context.Context, conn connector.Connector, scanID string, tables []connector.TableRef, rep *Report) (int, bool) {
+	type result struct {
+		idx      int
+		timedOut bool // ожидание слота/работа прерваны ctx-отменой (не failed-таблица)
+		failed   bool
+		overload bool
+	}
+	gate := NewTableGate(e.cfg.MaxTables)
+	tasks := make(chan int)
+	results := make(chan result)
+	var wg sync.WaitGroup
+	for range e.cfg.MaxTables {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range tasks {
+				t := tables[idx]
+				if err := gate.Acquire(ctx); err != nil {
+					// отмена прогона в ожидании слота — таблица не тронута,
+					// чекпоинта нет (resume догонит, п. 13.2)
+					results <- result{idx: idx, timedOut: true}
+					continue
+				}
+				err := e.scanTableRetry(ctx, conn, scanID, t, rep)
+				gate.Release()
+				switch {
+				case err == nil:
+					results <- result{idx: idx}
+				case ctx.Err() != nil:
+					// отмена прогона ≠ ошибка таблицы: interrupted-прогон не
+					// должен кормить серию breaker'а
+					results <- result{idx: idx, timedOut: true}
+				default:
+					results <- result{idx: idx, failed: true,
+						overload: connector.ClassifyFailure(err) == connector.ReasonOverload}
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(tasks)
+		for i := range tables {
+			select {
+			case tasks <- i:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	consecutiveOverload := 0
+	interrupted := false
+	stopFeed := false
+	pending := map[int]result{}
+	next := 0
+	for next < len(tables) {
+		r, ok := pending[next]
+		if !ok {
+			var open bool
+			r, open = <-results
+			if !open {
+				break
+			}
+			pending[r.idx] = r
+			continue
+		}
+		delete(pending, next)
+		next++
+		if stopFeed {
+			continue // breaker сработал раньше — таблица не считается
+		}
+		switch {
+		case r.timedOut:
+			interrupted = true
+		case r.failed:
+			rep.TablesFailed++
+			if r.overload {
+				consecutiveOverload++
+			} else {
+				consecutiveOverload = 0
+			}
+			if e.tripBreakerIfNeeded(ctx, scanID, rep, consecutiveOverload) {
+				stopFeed = true
+			}
+		default:
+			rep.TablesDone++
+			consecutiveOverload = 0
+		}
+	}
+	if stopFeed {
+		wg.Wait() // начатые воркеры коммитят чекпоинты (п. 13); закрытие results
+		for range results {
+		}
+	}
+	if ctx.Err() != nil {
+		interrupted = true
+	}
+	return consecutiveOverload, interrupted
+}
+
+// tripBreakerIfNeeded — общий хвост серии overload (п. 13.2): срабатывание
+// breaker'а, аудит source_paused (best effort — прогон уже падает).
+func (e *Engine) tripBreakerIfNeeded(ctx context.Context, scanID string, rep *Report, consecutiveOverload int) bool {
+	if e.cfg.Breaker == nil || consecutiveOverload < breakerConsecutiveFails {
+		return false
+	}
+	until := e.cfg.Breaker.Trip(rep.Source, e.nowFn(), breakerPause)
+	rep.BreakerTripped = true
+	_ = e.st.AppendAudit(context.WithoutCancel(ctx), []audit.Event{e.scanEvent(scanID, "source_paused", map[string]any{
+		"source": rep.Source, "consecutive_overload_failures": consecutiveOverload,
+		"pause_min":    breakerPause.Minutes(),
+		"paused_until": until.UTC().Format(time.RFC3339),
+	})})
+	return true
+}
+
 // scanTableRetry оборачивает scanTable повторами (blueprint п. 13.2):
 // retry — только на retryable-ошибки драйвера (перегрузка, таймаут,
 // потеря лидерства), всего до 3 попыток с нарастающей паузой; прочие
 // ошибки сразу фиксируют таблицу failed.
 func (e *Engine) scanTableRetry(ctx context.Context, conn connector.Connector, scanID string, t connector.TableRef, rep *Report) error {
+	ts := e.newTableState() // локальный буфер таблицы (п. 13; S8-2: воркеры)
+	defer ts.drop()
 	for attempt := 0; ; attempt++ {
-		err := e.scanTable(ctx, conn, scanID, t, rep)
+		err := e.scanTable(ctx, conn, scanID, t, rep, ts)
 		if err == nil || !connector.IsRetryable(err) || attempt >= len(retryBackoff) {
 			return err
 		}
@@ -439,21 +606,30 @@ func (e *Engine) scanTableRetry(ctx context.Context, conn connector.Connector, s
 	}
 }
 
-func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID string, t connector.TableRef, rep *Report) error {
-	e.takeCalls() // сброс буфера: вызовы failed-таблицы не должны попасть в чужой коммит (п. 13)
-	e.takeEvents()
-	cols, err := conn.GetSchema(ctx, t)
+// scanTable обрабатывает таблицу целиком (схема → сэмплы колонок →
+// коммит чекпоинта). Вызовы/события LLM — в локальном буфере ts (S8-2:
+// потокобезопасность воркеров, п. 13.2); коммит — одна транзакция с
+// вердиктами (п. 13). При cfg.QueryTimeout>0 каждый запрос к БД
+// (схема/счёт/сэмпл) оборачивается собственным дедлайном (п. 13.2,
+// query_timeout_s источника; исходный ctx — общий дедлайн прогона).
+func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID string, t connector.TableRef, rep *Report, ts *tableState) error {
+	ts.reset() // сброс буфера: вызовы failed-таблицы не должны попасть в чужой коммит (п. 13)
+	schemaCtx, cancelSchema := e.queryCtx(ctx)
+	cols, err := conn.GetSchema(schemaCtx, t)
+	cancelSchema()
 	if err != nil {
 		_ = e.st.MarkTable(ctx, scanID, t.Name, 0, "failed", err.Error(), string(connector.ClassifyFailure(err)))
 		return err
 	}
 	var rowCount int64
-	if n, err := conn.CountRows(ctx, t); err == nil {
+	countCtx, cancelCount := e.queryCtx(ctx)
+	if n, err := conn.CountRows(countCtx, t); err == nil {
 		rowCount = n
 	}
+	cancelCount()
 	vs := make([]verdict.Verdict, 0, len(cols))
 	for _, col := range cols {
-		v, err := e.classifyColumn(ctx, conn, scanID, t, col)
+		v, err := e.classifyColumn(ctx, conn, scanID, t, col, ts)
 		if err != nil {
 			// обрыв стрима сэмпла → таблица failed, чекпоинт (п. 6)
 			_ = e.st.MarkTable(ctx, scanID, t.Name, rowCount, "failed", err.Error(), string(connector.ClassifyFailure(err)))
@@ -463,15 +639,28 @@ func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID
 	}
 	// вердикты, учётные записи вызовов и аудит таблицы — одна транзакция
 	// (п. 13: либо всё, либо откат; ADR-0013: действие без аудита не совершено)
-	if err := e.st.SaveVerdictsWithCalls(ctx, vs, e.takeCalls(), e.takeEvents()); err != nil {
+	if err := e.st.SaveVerdictsWithCalls(ctx, vs, ts.takeCalls(), ts.takeEvents()); err != nil {
 		_ = e.st.MarkTable(ctx, scanID, t.Name, rowCount, "failed", err.Error(), string(connector.ClassifyFailure(err)))
 		return err
 	}
 	return e.st.MarkTable(ctx, scanID, t.Name, rowCount, "done", "", "")
 }
 
-func (e *Engine) classifyColumn(ctx context.Context, conn connector.Connector, scanID string, t connector.TableRef, col connector.Column) (verdict.Verdict, error) {
-	seq, err := conn.Sample(ctx, connector.SampleSpec{
+// queryCtx — дедлайн запроса к БД поверх ctx прогона (п. 13.2:
+// query_timeout_s источника). cfg.QueryTimeout<=0 — без дополнительного
+// дедлайна (поведение до инкремента; отмена прогона — через родительский
+// ctx). Дочерний дедлайн не накапливается: каждый запрос ограничен
+// отдельно, прогон — общим ctx.
+func (e *Engine) queryCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	if e.cfg.QueryTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, e.cfg.QueryTimeout)
+}
+
+func (e *Engine) classifyColumn(ctx context.Context, conn connector.Connector, scanID string, t connector.TableRef, col connector.Column, ts *tableState) (verdict.Verdict, error) {
+	sampleCtx, cancelSample := e.queryCtx(ctx)
+	seq, err := conn.Sample(sampleCtx, connector.SampleSpec{
 		Table:   t,
 		Mode:    e.cfg.SampleMode,
 		Value:   e.cfg.SampleValue,
@@ -479,6 +668,7 @@ func (e *Engine) classifyColumn(ctx context.Context, conn connector.Connector, s
 		MaxRows: e.cfg.MaxRows,
 	})
 	if err != nil {
+		cancelSample()
 		return verdict.Verdict{}, err
 	}
 	pool, err := sampler.Build(seq, col.Name, sampler.Options{
@@ -486,15 +676,17 @@ func (e *Engine) classifyColumn(ctx context.Context, conn connector.Connector, s
 		MaxStringChars: e.cfg.MaxStringChars,
 		Dedup:          e.cfg.Dedup,
 	})
+	cancelSample() // стрим сэмпла прочитан до конца — дедлайн закрыт
 	if err != nil {
 		return verdict.Verdict{}, err
 	}
-	return e.verdict(ctx, scanID, t, col, pool), nil
+	return e.verdict(ctx, scanID, t, col, pool, ts), nil
 }
 
 // verdict собирает вердикт колонки: слой 0 (имя) + слой 1 (rules) + слой 2 (LLM,
-// серый коридор) → ensemble (п. 7).
-func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRef, col connector.Column, pool *sampler.Pool) verdict.Verdict {
+// серый коридор) → ensemble (п. 7). Вызовы/события LLM — в буфере таблицы
+// ts (S8-2: воркеры, п. 13.2); кластерер и счётчики — под мьютексами.
+func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRef, col connector.Column, pool *sampler.Pool, ts *tableState) verdict.Verdict {
 	sum := sha1.Sum([]byte(scanID + "|" + t.Name + "|" + col.Name)) // п. 5.4
 	v := verdict.Verdict{
 		ID:               hex.EncodeToString(sum[:]),
@@ -530,14 +722,13 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 	feat := fingerprint.Compute(col.NativeType, maskedVals, pool.Total, pool.Nulls)
 	v.ClusterID = ""
 	propagated := false
+	e.cluMu.Lock()
 	if e.clusterer != nil {
 		if id, ok := e.clusterer.Find(feat); ok {
 			v.ClusterID = id
 			if pv, ok := e.clusterer.Verdict(id); ok {
 				applyClusterVerdict(&v, pv)
 				propagated = true
-				e.stats.propagated++
-				observe.Default.IncrClusterPropagated() // п. 17
 			} else {
 				e.clusterer.Attach(id)
 			}
@@ -545,7 +736,12 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 			v.ClusterID = e.clusterer.Register(feat)
 		}
 	}
+	e.cluMu.Unlock()
 	if propagated {
+		e.statsMu.Lock()
+		e.stats.propagated++
+		e.statsMu.Unlock()
+		observe.Default.IncrClusterPropagated() // п. 17
 		e.finalizeVerdict(&v, pool, evRules)
 		v.Evidence["cluster_propagated"] = true
 		return v
@@ -565,19 +761,19 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 	// превышения cost_scan_limit_usd вызовы не делаются, колонка остаётся
 	// pending с пометкой budget_exceeded.
 	if e.llm != nil && out.Escalate && e.enoughForLLM(pool) {
-		if e.budgetExceeded {
+		if e.budgetHit() {
 			if v.Evidence == nil {
 				v.Evidence = map[string]any{}
 			}
 			v.Evidence["budget_exceeded"] = true
 		} else {
-			if res := e.llmClassify(ctx, col, pool, maskedVals, &v); res != nil {
+			if res := e.llmClassify(ctx, col, pool, maskedVals, &v, ts); res != nil {
 				cands = append(cands, ensemble.Candidate{Label: verdict.Label(res.Label), Confidence: res.Confidence, Layer: verdict.LayerLLM})
 				out = ensemble.Decide(cands, e.cfg.TauAccept, weights, gray)
 			}
 			// эскалация в верификатор, если решение всё ещё в серой зоне (п. 7 правило 4)
-			if out.Escalate && !e.budgetExceeded {
-				e.verifyGray(ctx, col, pool, &v, &out)
+			if out.Escalate && !e.budgetHit() {
+				e.verifyGray(ctx, col, pool, &v, &out, ts)
 			}
 		}
 	}
@@ -586,12 +782,16 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 	v.EvidenceLayer = out.Layer
 	v.ReviewStatus = out.ReviewStatus
 	e.finalizeVerdict(&v, pool, evRules)
-	if v.ClusterID != "" && e.clusterer != nil {
+	if v.ClusterID != "" {
 		// вердикт представителя — источник для распространения (п. 7.6)
-		e.clusterer.SetVerdict(v.ClusterID, cluster.VerdictView{
-			Label: string(v.Label), Confidence: v.Confidence,
-			Layer: string(v.EvidenceLayer), ReviewStatus: string(v.ReviewStatus),
-		})
+		e.cluMu.Lock()
+		if e.clusterer != nil {
+			e.clusterer.SetVerdict(v.ClusterID, cluster.VerdictView{
+				Label: string(v.Label), Confidence: v.Confidence,
+				Layer: string(v.EvidenceLayer), ReviewStatus: string(v.ReviewStatus),
+			})
+		}
+		e.cluMu.Unlock()
 	}
 	return v
 }
@@ -648,19 +848,21 @@ type cachedLLMVerdict struct {
 // llmClassify вызывает LLM-классификатора с кэшем вердиктов (п. 10.5): при
 // промахе — вызов и запись в кэш (TTL CacheTTLDefault), при попадании —
 // вердикт без сетевого обращения. Каждое обращение (вызов, ошибка, попадание
-// в кэш) порождает запись agent_calls (п. 10.6), коммит — с вердиктами
-// таблицы (п. 13). Возвращает nil при ошибке вызова.
-func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sampler.Pool, maskedVals []string, v *verdict.Verdict) *agentproxy.ClassifyResult {
+// в кэш) порождает запись agent_calls (п. 10.6) в буфер таблицы ts,
+// коммит — с вердиктами (п. 13). Возвращает nil при ошибке вызова.
+func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sampler.Pool, maskedVals []string, v *verdict.Verdict, ts *tableState) *agentproxy.ClassifyResult {
 	cacheKey := ""
 	if e.cfg.CacheScope != "" {
 		cacheKey = llmCacheKey(e.cfg.CacheScope, e.cfg.TaxonomyVersion, fingerprint.ValuesHash(maskedVals))
 		if cv, ok, err := e.st.CacheGet(ctx, cacheKey, e.nowFn()); err == nil && ok {
 			if cached, err := decodeCachedVerdict(cv.VerdictJSON); err == nil {
+				e.statsMu.Lock()
 				e.stats.cacheHits++
+				e.statsMu.Unlock()
 				setLLMCacheEvidence(v, cv.AgentID, true)
 				// попадание в кэш — тоже учётная запись (cached=1, метрика
 				// доли кэша п. 17); сетевого вызова и токенов нет
-				e.recordCall(v, store.AgentCall{
+				e.recordCall(v, ts, store.AgentCall{
 					PromptVersion: cached.PromptVersion,
 					Status:        "cache_hit",
 					Cached:        true,
@@ -673,19 +875,23 @@ func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sa
 	res, err := e.llm.Classify(ctx, col.NativeType, pool.Values)
 	measured := e.nowFn().Sub(start)
 	if err != nil || res == nil {
+		e.statsMu.Lock()
 		e.stats.llmErrors++
-		e.recordCall(v, store.AgentCall{
+		e.statsMu.Unlock()
+		e.recordCall(v, ts, store.AgentCall{
 			PromptVersion: prompts.Version, LatencyMS: int64(measured / time.Millisecond), Status: "error",
 		})
 		return nil
 	}
+	e.statsMu.Lock()
 	e.stats.llmCalls++
+	e.statsMu.Unlock()
 	v.PromptVersion = res.PromptVersion
 	latency := res.Latency
 	if latency <= 0 {
 		latency = measured // fake-реализации latency не отдают — меряем сами
 	}
-	e.recordCall(v, store.AgentCall{
+	e.recordCall(v, ts, store.AgentCall{
 		PromptVersion: res.PromptVersion,
 		TokensIn:      res.Usage.TokensIn, TokensOut: res.Usage.TokensOut,
 		CostUSD:   e.callCost(ctx, res.Usage.TokensIn, res.Usage.TokensOut),
@@ -710,15 +916,17 @@ func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sa
 }
 
 // verifyGray — эскалация в режим верификатора (п. 7 правило 4) с учётной
-// записью вызова (п. 10.6): Verify основного агента или escalate_to — решает
-// подставленный классификатор (в CLI — композит).
-func (e *Engine) verifyGray(ctx context.Context, col connector.Column, pool *sampler.Pool, v *verdict.Verdict, out *ensemble.Outcome) {
+// записью вызова (п. 10.6) в буфер таблицы ts: Verify основного агента или
+// escalate_to — решает подставленный классификатор (в CLI — композит).
+func (e *Engine) verifyGray(ctx context.Context, col connector.Column, pool *sampler.Pool, v *verdict.Verdict, out *ensemble.Outcome, ts *tableState) {
 	start := e.nowFn()
 	vr, err := e.llm.Verify(ctx, string(out.GrayBest.Label), col.NativeType, pool.Values)
 	measured := e.nowFn().Sub(start)
 	if err != nil || vr == nil {
+		e.statsMu.Lock()
 		e.stats.llmErrors++
-		e.recordCall(v, store.AgentCall{
+		e.statsMu.Unlock()
+		e.recordCall(v, ts, store.AgentCall{
 			PromptVersion: prompts.Version, LatencyMS: int64(measured / time.Millisecond), Status: "error",
 		})
 		return
@@ -727,7 +935,7 @@ func (e *Engine) verifyGray(ctx context.Context, col connector.Column, pool *sam
 	if latency <= 0 {
 		latency = measured
 	}
-	e.recordCall(v, store.AgentCall{
+	e.recordCall(v, ts, store.AgentCall{
 		PromptVersion: prompts.Version,
 		TokensIn:      vr.Usage.TokensIn, TokensOut: vr.Usage.TokensOut,
 		CostUSD:   e.callCost(ctx, vr.Usage.TokensIn, vr.Usage.TokensOut),
@@ -741,10 +949,11 @@ func (e *Engine) verifyGray(ctx context.Context, col connector.Column, pool *sam
 
 // recordCall копит учётную запись вызова (п. 10.6) и парное аудит-событие
 // (п. 14.2: каждый вызов агента — событие со ссылкой на agent_calls) в буфере
-// таблицы; коммит — вместе с вердиктами (п. 13). Стоимость и токены
+// таблицы ts; коммит — вместе с вердиктами (п. 13). Стоимость и токены
 // накапливаются только по реальным ok-вызовам; при достижении
-// cost_scan_limit_usd ставится budgetExceeded (п. 10.4).
-func (e *Engine) recordCall(v *verdict.Verdict, call store.AgentCall) {
+// cost_scan_limit_usd ставится budgetExceeded (п. 10.4, под мьютексом —
+// воркеры S8-2).
+func (e *Engine) recordCall(v *verdict.Verdict, ts *tableState, call store.AgentCall) {
 	call.ID = store.NewCallID()
 	call.ScanID = v.ScanID
 	call.VerdictID = v.ID
@@ -755,8 +964,8 @@ func (e *Engine) recordCall(v *verdict.Verdict, call store.AgentCall) {
 		call.Model = e.llmID.Model
 	}
 	call.CreatedAt = e.nowFn()
-	e.calls = append(e.calls, call)
-	e.events = append(e.events, audit.Event{
+	ts.calls = append(ts.calls, call)
+	ts.events = append(ts.events, audit.Event{
 		Actor: e.actor(), Category: audit.CatAgent, Action: "agent_call",
 		Target: "agent:" + call.AgentID, TS: call.CreatedAt,
 		Details: map[string]any{
@@ -768,12 +977,16 @@ func (e *Engine) recordCall(v *verdict.Verdict, call store.AgentCall) {
 		},
 	})
 	if call.Status == "ok" && !call.Cached {
+		e.callsMu.Lock()
 		e.cost += call.CostUSD
-		e.stats.tokensIn += call.TokensIn
-		e.stats.tokensOut += call.TokensOut
 		if e.cfg.CostScanLimitUSD > 0 && e.cost >= e.cfg.CostScanLimitUSD {
 			e.budgetExceeded = true
 		}
+		e.callsMu.Unlock()
+		e.statsMu.Lock()
+		e.stats.tokensIn += call.TokensIn
+		e.stats.tokensOut += call.TokensOut
+		e.statsMu.Unlock()
 	}
 	// процессные счётчики (п. 17, expvar /debug/vars)
 	switch {
@@ -788,19 +1001,27 @@ func (e *Engine) recordCall(v *verdict.Verdict, call store.AgentCall) {
 	}
 }
 
-// takeCalls возвращает буфер вызовов таблицы и очищает его (передача в
-// транзакцию п. 13).
-func (e *Engine) takeCalls() []store.AgentCall {
-	calls := e.calls
-	e.calls = nil
-	return calls
+// statsSnapshot — снимок счётчиков экономики скана (п. 17) под мьютексом
+// (S8-2: параллельные воркеры п. 13.2). Читается один раз при финализации.
+func (e *Engine) statsSnapshot() scanStats {
+	e.statsMu.Lock()
+	defer e.statsMu.Unlock()
+	return e.stats
 }
 
-// takeEvents — буфер аудит-событий таблицы (ADR-0013), коммит с вердиктами.
-func (e *Engine) takeEvents() []audit.Event {
-	events := e.events
-	e.events = nil
-	return events
+// costSnap — накопленная стоимость скана (п. 10.4) под мьютексом.
+func (e *Engine) costSnap() float64 {
+	e.callsMu.Lock()
+	defer e.callsMu.Unlock()
+	return e.cost
+}
+
+// budgetHit — флаг budget-стопа скана (п. 10.4) под мьютексом (S8-2:
+// читается параллельными воркерами п. 13.2).
+func (e *Engine) budgetHit() bool {
+	e.callsMu.Lock()
+	defer e.callsMu.Unlock()
+	return e.budgetExceeded
 }
 
 // callCost — стоимость вызова по прайс-листу model_prices (п. 11.1):
@@ -815,8 +1036,11 @@ func (e *Engine) callCost(ctx context.Context, tokensIn, tokensOut int) float64 
 	return math.Round(cost*1e6) / 1e6
 }
 
-// priceFor — цена модели с ленивым кэшем прайс-листа на скан.
+// priceFor — цена модели с ленивым кэшем прайс-листа на скан (под
+// мьютексом — воркеры S8-2 п. 13.2).
 func (e *Engine) priceFor(ctx context.Context, model string) (float64, float64, bool) {
+	e.callsMu.Lock()
+	defer e.callsMu.Unlock()
 	if e.prices == nil {
 		e.prices = map[string]modelPrice{}
 	}

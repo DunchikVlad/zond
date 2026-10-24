@@ -274,6 +274,11 @@ func runScan(args []string) int {
 	// Circuit breaker (п. 13.2): в CLI экземпляр на процесс — срабатывание
 	// внутри прогона корректно; в serve шарится между прогонами (runner).
 	cfg.Breaker = scanengine.NewBreaker()
+	// Лимиты источника (п. 13.2, S8-2): таблицы параллельно до
+	// max_concurrent_tables, дедлайн запроса к БД — query_timeout_s.
+	// max_concurrent_scans в CLI не применим — один прогон на процесс.
+	cfg.MaxTables = src.TablesLimit()
+	cfg.QueryTimeout = src.QueryTimeout()
 	if *resume {
 		prev, err := st.LastCheckpointScan(context.Background(), src.Name)
 		if err != nil {
@@ -439,9 +444,9 @@ func taxonomyLabels(t *config.Taxonomy) []string {
 // ---------------------------------------------------------------------------
 
 // engineRunner — api.ScanRunner поверх scanengine: асинхронные прогоны с
-// мягкой остановкой через ctx (п. 11.2). Resource governance этапа 5:
-// один активный прогон на источник (п. 13.2; per-source caps).
-// Инкремент 8: общий circuit breaker процесса (п. 13.2).
+// мягкой остановкой через ctx (п. 11.2). Resource governance (п. 13.2):
+// max_concurrent_scans источника (семафоры map, default 1) и общий
+// circuit breaker процесса (инкремент 8-1).
 type engineRunner struct {
 	b        *config.Bundle
 	st       *store.Store
@@ -450,16 +455,17 @@ type engineRunner struct {
 	resolver secrets.Resolver // ref-источников (Vault, ADR-0012); nil — режим ENV
 	breaker  *scanengine.Breaker
 
-	mu      sync.Mutex
-	running map[string]context.CancelFunc // scan_id → cancel
-	sources map[string]bool               // источник занят активным прогоном
+	mu       sync.Mutex
+	running  map[string]context.CancelFunc // scan_id → cancel
+	srcSlots map[string]chan struct{}      // source → семафор max_concurrent_scans (п. 13.2)
 }
 
 func newEngineRunner(b *config.Bundle, st *store.Store, log *slog.Logger, useLLM bool, resolver secrets.Resolver) *engineRunner {
 	return &engineRunner{
 		b: b, st: st, log: log, useLLM: useLLM, resolver: resolver,
-		breaker: scanengine.NewBreaker(),
-		running: map[string]context.CancelFunc{}, sources: map[string]bool{},
+		breaker:  scanengine.NewBreaker(),
+		running:  map[string]context.CancelFunc{},
+		srcSlots: map[string]chan struct{}{},
 	}
 }
 
@@ -516,29 +522,41 @@ func (r *engineRunner) Start(source, profile, actor string) (string, error) {
 	scanID := newAPIScanID()
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
-	if r.sources[source] {
+	// max_concurrent_scans источника (п. 13.2, S8-2): семафор процесса
+	// (default 1); слот занят активным прогоном до его завершения.
+	slots, ok := r.srcSlots[source]
+	if !ok {
+		slots = make(chan struct{}, src.ScansLimit())
+		r.srcSlots[source] = slots
+	}
+	select {
+	case slots <- struct{}{}:
+	default:
 		r.mu.Unlock()
 		cancel()
 		conn.Close()
 		return "", &api.SourceUnavailableError{
-			Reason: fmt.Sprintf("источник %q уже сканируется (1 активный прогон на источник, п. 13.2)", source),
+			Reason: fmt.Sprintf("источник %q: лимит max_concurrent_scans=%d исчерпан (п. 13.2)", source, cap(slots)),
 		}
 	}
 	r.running[scanID] = cancel
-	r.sources[source] = true
 	r.mu.Unlock()
 
 	go func() {
 		defer func() {
 			r.mu.Lock()
 			delete(r.running, scanID)
-			delete(r.sources, source)
+			<-slots // освобождение слота max_concurrent_scans (п. 13.2)
 			r.mu.Unlock()
 			conn.Close()
 		}()
 		cfg := engineConfig(r.b)
 		cfg.Actor = actor // п. 14.2: прогон аудируется от имени инициатора
 		cfg.Breaker = r.breaker
+		// Лимиты источника (п. 13.2, S8-2): таблицы параллельно до
+		// max_concurrent_tables, дедлайн запроса к БД — query_timeout_s.
+		cfg.MaxTables = src.TablesLimit()
+		cfg.QueryTimeout = src.QueryTimeout()
 		eng := scanengine.New(r.st, meta.New(r.b.Taxonomy.Synonyms), cfg)
 		if llm != nil {
 			eng.SetLLM(llm, llmID)

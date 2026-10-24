@@ -8,18 +8,28 @@
 //
 //  1. прочистка verdict_cache — ежедневно в 03:17 локального времени
 //     (st.CachePurgeExpired → аудит scheduler/cache_purge {removed});
+//
 //  2. retention сканов — ежедневно в 04:23: удаление прогонов старше 90 дней
 //     вместе со связанными данными (st.PurgeScansOlderThan → аудит
 //     scheduler/retention_purge {removed_scans, cutoff});
+//
 //  3. периодические пересканы: для каждого источника cfg с непустым schedule
 //     (cron-выражение) — runner.Start(source, "", "scheduler"). Невалидное
 //     выражение → warn-лог + аудит scheduler/invalid_schedule {source,
 //     schedule}, источник пропускается (старт не падает);
+//
 //  4. оценка алертов (S6в, п. 17) — alertsFn по расписанию specAlerts
 //     (default каждые 5 минут; подключается WithAlerts; nil — выключено);
+//
 //  5. резервное копирование (S7б, п. 15.2) — online-копия БД в backupDir по
 //     расписанию backupSpec (подключается WithBackup; пусто — выключено).
 //     Факт каждой попытки (ok/fail) — в аудит, читает правило backup_failed.
+//
+//  6. окна сканирования (S8-2, п. 13.2): источник с scan_window
+//     ("HH:MM-HH:MM", локальное время) — срабатывание cron вне окна
+//     откладывает старт до начала окна (разовый таймер; аудит
+//     scheduler/scan_deferred); ручные запуски (API/CLI) окном не
+//     ограничиваются — это осознанное действие оператора.
 package scheduler
 
 import (
@@ -27,6 +37,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -65,6 +76,12 @@ type Scheduler struct {
 	sources []config.Source
 	cron    *cron.Cron
 	nowFn   func() time.Time
+	windows map[string]config.Window // scan_window источников (п. 13.2)
+
+	// Отложенные старты (окно сканирования, п. 13.2): разовые таймеры до
+	// начала окна; Stop останавливает вместе с cron.
+	mu     sync.Mutex
+	timers map[*time.Timer]struct{}
 
 	purgeSpec     string
 	retentionSpec string
@@ -132,13 +149,27 @@ func WithNowFn(fn func() time.Time) Option {
 }
 
 // New собирает планировщик; log nil → discard. Регистрация задач — Start.
+// Окна сканирования (scan_window) разбираются здесь: формат гарантирован
+// валидацией конфига (fail-fast, п. 13.2); битое значение (прямая сборка в
+// тестах) — источник без окна.
 func New(st *store.Store, runner ScanStarter, log *slog.Logger, sources []config.Source, opts ...Option) *Scheduler {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
+	windows := map[string]config.Window{}
+	for _, src := range sources {
+		if src.ScanWindow == "" {
+			continue
+		}
+		if w, err := config.ParseWindow(src.ScanWindow); err == nil {
+			windows[src.Name] = w
+		}
+	}
 	s := &Scheduler{
 		st: st, runner: runner, log: log, sources: sources,
 		nowFn:         time.Now,
+		windows:       windows,
+		timers:        map[*time.Timer]struct{}{},
 		purgeSpec:     specCachePurge,
 		retentionSpec: specRetention,
 		retentionAge:  retentionAge,
@@ -179,7 +210,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 			continue
 		}
 		name, spec := src.Name, src.Schedule
-		if _, err := c.AddFunc(spec, func() { s.rescan(name) }); err != nil {
+		if _, err := c.AddFunc(spec, func() { s.rescan(ctx, name) }); err != nil {
 			// Не роняем старт: предупреждение + аудит, источник пропускается.
 			s.log.Warn("scheduler: невалидное расписание источника, перескан не настроен",
 				"source", name, "schedule", spec, "error", err)
@@ -195,8 +226,15 @@ func (s *Scheduler) Start(ctx context.Context) error {
 }
 
 // Stop останавливает cron, дожидаясь завершения начатых задач
-// (blueprint п. 13: плавная остановка).
+// (blueprint п. 13: плавная остановка), и снимает отложенные окном
+// таймеры (п. 13.2).
 func (s *Scheduler) Stop() {
+	s.mu.Lock()
+	for t := range s.timers {
+		t.Stop()
+	}
+	s.timers = map[*time.Timer]struct{}{}
+	s.mu.Unlock()
 	if s.cron == nil {
 		return
 	}
@@ -231,11 +269,54 @@ func (s *Scheduler) retention(ctx context.Context) {
 // rescan — периодический перескан источника по расписанию (п. 15). Профиль —
 // default из detectors.yaml (пустая строка → решает runner). Ошибки старта
 // (недоступность источника/LLM) — в лог: задача повторится по расписанию.
-func (s *Scheduler) rescan(source string) {
+// Окно сканирования (п. 13.2): источник с scan_window, сработавший вне окна,
+// — старт откладывается до начала окна (разовый таймер, аудит
+// scheduler/scan_deferred).
+func (s *Scheduler) rescan(ctx context.Context, source string) {
 	if s.runner == nil {
 		s.log.Warn("scheduler: перескан невозможен — runner не подключён", "source", source)
 		return
 	}
+	if w, ok := s.windows[source]; ok {
+		now := s.nowFn()
+		if !w.Contains(now) {
+			start := w.NextStart(now)
+			d := start.Sub(now)
+			s.log.Info("scheduler: перескан вне окна — отложен до начала окна (п. 13.2)",
+				"source", source, "window_start", start.Format(time.RFC3339), "delay", d.Round(time.Second))
+			s.audit(ctx, "scheduler/scan_deferred", "source:"+source, map[string]any{
+				"source":       source,
+				"window_start": start.UTC().Format(time.RFC3339),
+				"delay_s":      int(d.Seconds()),
+			})
+			s.deferScan(ctx, source, d)
+			return
+		}
+	}
+	s.startScan(source)
+}
+
+// deferScan — разовый таймер до начала окна (п. 13.2). По срабатывании —
+// повторный rescan (окно проверяется заново: часы могли сдвинуться); по
+// Stop таймер снимается.
+func (s *Scheduler) deferScan(ctx context.Context, source string, d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	var t *time.Timer
+	t = time.AfterFunc(d, func() {
+		s.mu.Lock()
+		delete(s.timers, t) // таймер уже отработал; при гонке со Stop — no-op
+		s.mu.Unlock()
+		s.rescan(ctx, source)
+	})
+	s.mu.Lock()
+	s.timers[t] = struct{}{}
+	s.mu.Unlock()
+}
+
+// startScan — немедленный старт перескана через runner (п. 15).
+func (s *Scheduler) startScan(source string) {
 	scanID, err := s.runner.Start(source, "", actor)
 	if err != nil {
 		s.log.Warn("scheduler: перескан не запустился", "source", source, "error", err)

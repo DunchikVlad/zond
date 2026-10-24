@@ -15,6 +15,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -163,6 +164,13 @@ type Backup struct {
 	Dir      string `yaml:"dir"`      // каталог назначения (обязателен при schedule)
 }
 
+// Дефолты resource governance источника (blueprint п. 13.2).
+const (
+	DefaultMaxConcurrentScans  = 1   // max_concurrent_scans
+	DefaultMaxConcurrentTables = 2   // max_concurrent_tables
+	DefaultQueryTimeoutS       = 300 // таймаут запроса к БД, сек (5 мин)
+)
+
 // Source — один источник данных.
 type Source struct {
 	Name string `yaml:"name"`
@@ -177,6 +185,45 @@ type Source struct {
 	// Валидация выражения — задача шедулера (при ошибке: warn-лог + аудит,
 	// источник пропускается, старт serve не роняется).
 	Schedule string `yaml:"schedule"`
+
+	// Лимиты на источник (blueprint п. 13.2, resource governance):
+	// 0 → дефолт спецификации. max_concurrent_scans — активные прогоны
+	// источника (serve), max_concurrent_tables — таблиц в обработке
+	// одновременно внутри прогона, query_timeout_s — таймаут запроса к БД
+	// (сек, дефолт 300 = 5 мин).
+	MaxConcurrentScans  int `yaml:"max_concurrent_scans"`
+	MaxConcurrentTables int `yaml:"max_concurrent_tables"`
+	QueryTimeoutS       int `yaml:"query_timeout_s"`
+
+	// ScanWindow — окно сканирования (п. 13.2, опция): "HH:MM-HH:MM"
+	// локального времени; старт перескана вне окна откладывается
+	// шедулером до начала окна. Пусто — без окна (перескан по schedule
+	// в любое время). Формат проверяется при загрузке (fail-fast).
+	ScanWindow string `yaml:"scan_window"`
+}
+
+// ScansLimit — max_concurrent_scans с дефолтом спецификации (п. 13.2).
+func (s *Source) ScansLimit() int {
+	if s.MaxConcurrentScans <= 0 {
+		return DefaultMaxConcurrentScans
+	}
+	return s.MaxConcurrentScans
+}
+
+// TablesLimit — max_concurrent_tables с дефолтом спецификации (п. 13.2).
+func (s *Source) TablesLimit() int {
+	if s.MaxConcurrentTables <= 0 {
+		return DefaultMaxConcurrentTables
+	}
+	return s.MaxConcurrentTables
+}
+
+// QueryTimeout — таймаут запроса к БД с дефолтом спецификации (п. 13.2).
+func (s *Source) QueryTimeout() time.Duration {
+	if s.QueryTimeoutS <= 0 {
+		return DefaultQueryTimeoutS * time.Second
+	}
+	return time.Duration(s.QueryTimeoutS) * time.Second
 }
 
 // SSO — параметры SAML 2.0 Service Provider (ADR-0011). Только публичные поля.
@@ -229,6 +276,21 @@ func (c *Connections) Validate() error {
 		}
 		if s.Ref != "" && !c.Vault.Enabled {
 			errs = append(errs, fmt.Errorf("sources[%d] (%s): ref требует vault.enabled=true (ADR-0012)", i, s.Name))
+		}
+		// Лимиты п. 13.2: 0 → дефолт спецификации; отрицательные запрещены.
+		if s.MaxConcurrentScans < 0 {
+			errs = append(errs, fmt.Errorf("sources[%d] (%s): max_concurrent_scans должен быть >= 0 (0 = default %d, п. 13.2)", i, s.Name, DefaultMaxConcurrentScans))
+		}
+		if s.MaxConcurrentTables < 0 {
+			errs = append(errs, fmt.Errorf("sources[%d] (%s): max_concurrent_tables должен быть >= 0 (0 = default %d, п. 13.2)", i, s.Name, DefaultMaxConcurrentTables))
+		}
+		if s.QueryTimeoutS < 0 {
+			errs = append(errs, fmt.Errorf("sources[%d] (%s): query_timeout_s должен быть >= 0 (0 = default %d, п. 13.2)", i, s.Name, DefaultQueryTimeoutS))
+		}
+		if s.ScanWindow != "" {
+			if _, err := ParseWindow(s.ScanWindow); err != nil {
+				errs = append(errs, fmt.Errorf("sources[%d] (%s): scan_window: %w", i, s.Name, err))
+			}
 		}
 	}
 	if err := c.Vault.validate(seen); err != nil {

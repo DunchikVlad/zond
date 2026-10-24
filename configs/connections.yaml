@@ -10,6 +10,11 @@ sources:
     type: clickhouse
     dsn: "clickhouse://test:${CH_TEST_PASSWORD}@192.168.31.119:9000/default"
     # schedule: "0 2 * * *" # периодический перескан источника (blueprint п. 15, cron; пусто — только ручной запуск)
+    # Лимиты на источник (blueprint п. 13.2; 0/опущено — дефолт спецификации):
+    # max_concurrent_scans: 1    # активных прогонов источника (serve)
+    # max_concurrent_tables: 2   # таблиц в обработке одновременно внутри прогона
+    # query_timeout_s: 300       # дедлайн запроса к БД, сек (5 мин)
+    # scan_window: "02:00-06:00" # окно пересканов (локальное время; старт вне окна откладывается шедулером; через полночь — "22:00-02:00")
   - name: mongo-test
     type: mongodb
     uri: "mongodb://test:${MONGO_TEST_PASSWORD}@192.168.31.119:27017/testdb"
