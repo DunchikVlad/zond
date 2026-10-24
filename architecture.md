@@ -325,7 +325,7 @@ serve (1 процесс)
 | `internal/auth` | SAML SP, сессии, роли | SP, SessionStore, RBAC |
 | `internal/api` / `internal/web` | REST, UI | Handlers, Templates |
 | `internal/secrets` | резолвер секретов подключений (ADR-0012, S7в): Vault kv-v2 и dynamic leases (кэш лиз, фоновое продление), аутентификация token/kubernetes | Resolver, Vault, Authenticate, AuditHook |
-| `internal/audit` | hash-chain, sink | Auditor, Chain |
+| `internal/audit` | hash-chain, sink (S8-3: закладка `audit_sink_state`, воркер Pump; NDJSON/CEF) | Auditor, Chain, Sink |
 | `internal/logging` | JSON-лог, correlation id, redact | Logger, Redactor |
 | `internal/observe` | метрики и наблюдаемость (п. 17, S6в): счётчики процесса, expvar, снимки из store, алертинг + webhook | Meter, Snapshot, Evaluator, Webhook |
 | `internal/scheduler` | cron, окна, TTL-jobs | Scheduler |
