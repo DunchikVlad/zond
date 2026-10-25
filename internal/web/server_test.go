@@ -158,6 +158,34 @@ func TestCSRFProtection(t *testing.T) {
 	if code := post(addCSRF); code != http.StatusFound {
 		t.Fatalf("с парой cookie+заголовок: %d (ожидался 302)", code)
 	}
+	// S8-6: классическая форма (не HTMX) передаёт токен hidden-полем.
+	formPost := func(body string, mut func(*http.Request)) int {
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/scans/start", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: admin.ID})
+		req.AddCookie(&http.Cookie{Name: csrfCookie, Value: testCSRFToken})
+		if mut != nil {
+			mut(req)
+		}
+		resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	field := url.Values{"source": {"ch-test"}, "profile": {"deep"}, csrfField: {testCSRFToken}}
+	if code := formPost(field.Encode(), nil); code != http.StatusFound {
+		t.Fatalf("форма с полем csrf_token: %d (ожидался 302)", code)
+	}
+	bad := url.Values{"source": {"ch-test"}, "profile": {"deep"}, csrfField: {"другой"}}
+	if code := formPost(bad.Encode(), nil); code != http.StatusForbidden {
+		t.Fatalf("форма с чужим csrf_token: %d (ожидался 403)", code)
+	}
+	noTok := url.Values{"source": {"ch-test"}, "profile": {"deep"}}
+	if code := formPost(noTok.Encode(), nil); code != http.StatusForbidden {
+		t.Fatalf("форма без csrf_token: %d (ожидался 403)", code)
+	}
 	if runner.started != "ch-test" {
 		t.Fatalf("runner.started: %q", runner.started)
 	}
@@ -350,5 +378,37 @@ func TestReviewBulkAndAuditPage(t *testing.T) {
 	v, _ := st.GetVerdict(context.Background(), "v1")
 	if v.ReviewStatus != verdict.StatusRejected {
 		t.Fatalf("bulk reject: %+v", v)
+	}
+}
+
+// TestEvidenceLinesS86 — человекочитаемый рендер evidence (S8-6): правила
+// recognizer'ов, примеры сэмпла, объяснения LLM/верификатора.
+func TestEvidenceLinesS86(t *testing.T) {
+	v := verdict.Verdict{
+		Label: "EMAIL", EvidenceLayer: "rules", Confidence: 0.99,
+		Evidence: map[string]any{
+			"sample": map[string]any{"values": 20, "nulls": 0, "total": 20,
+				"examples": []any{"iv***@ex***.com", "+7 ***-45-67"}},
+			"rules": map[string]any{
+				"rules/email": map[string]any{"matched": 20, "total": 20, "checksum": false},
+				"rules/inn":   map[string]any{"matched": 2, "total": 20, "checksum": true},
+			},
+			"llm":        map[string]any{"model": "kimi-k2.6", "reason_ru": "маскированные email"},
+			"llm_verify": map[string]any{"verdict": "confirm", "label": "EMAIL", "confidence": 0.85, "reason_ru": "остатки совпадают"},
+		},
+	}
+	lines := evidenceLines(v)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"сэмпл: значений 20, null 0 из 20 · примеры:",
+		`"iv***@ex***.com"`,
+		"rules/email 20/20",
+		"rules/inn 2/20 (checksum)",
+		"LLM: kimi-k2.6: маскированные email",
+		"верификатор: confirm EMAIL (conf 0.85): остатки совпадают",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("нет строки %q в:\n%s", want, joined)
+		}
 	}
 }

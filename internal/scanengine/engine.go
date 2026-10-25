@@ -781,6 +781,14 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 			if res := e.llmClassify(ctx, col, pool, maskedVals, &v, ts); res != nil {
 				cands = append(cands, ensemble.Candidate{Label: verdict.Label(res.Label), Confidence: res.Confidence, Layer: verdict.LayerLLM})
 				out = ensemble.Decide(cands, e.cfg.TauAccept, weights, gray)
+				// объяснение модели — в evidence (S8-6): раньше reason_ru
+				// жил только в agent_calls, в вердикте терялся.
+				if v.Evidence == nil {
+					v.Evidence = map[string]any{}
+				}
+				v.Evidence["llm"] = map[string]any{
+					"reason_ru": res.ReasonRU, "agent": e.llmID.AgentID, "model": e.llmID.Model,
+				}
 			}
 			// эскалация в верификатор, если решение всё ещё в серой зоне (п. 7 правило 4)
 			if out.Escalate && !e.budgetHit() {
@@ -818,7 +826,12 @@ func (e *Engine) finalizeVerdict(v *verdict.Verdict, pool *sampler.Pool, evRules
 		v.Evidence = map[string]any{}
 	}
 	v.Evidence["rules"] = evRules
-	v.Evidence["sample"] = map[string]any{"values": len(pool.Values), "nulls": pool.Nulls, "total": pool.Total, "skipped": pool.Skipped}
+	v.Evidence["sample"] = map[string]any{
+		"values": len(pool.Values), "nulls": pool.Nulls, "total": pool.Total, "skipped": pool.Skipped,
+		// маскированные примеры для UI/review (ADR-0010: только маскированные
+		// значения по построению; S8-6 — «показать сэмпл» из эксплуатации).
+		"examples": maskedExamples(pool.Values),
+	}
 	if len(pool.Values) == 0 || (pool.Total > 0 && float64(pool.Nulls)/float64(pool.Total) > 0.95) {
 		v.Label = verdict.Label("UNKNOWN")
 		v.ReviewStatus = verdict.StatusPending
@@ -832,6 +845,22 @@ func applyClusterVerdict(v *verdict.Verdict, pv cluster.VerdictView) {
 	v.Confidence = pv.Confidence
 	v.EvidenceLayer = verdict.EvidenceLayer(pv.Layer)
 	v.ReviewStatus = verdict.ReviewStatus(pv.ReviewStatus)
+}
+
+// maskedExamples — до 3 маскированных примеров значений пула для evidence
+// (ADR-0010: маск-профиль п. 10.2; короткие < mask.MinLen пропускаются —
+// риск реидентации).
+func maskedExamples(values []string) []string {
+	out := make([]string, 0, 3)
+	for _, val := range values {
+		if m, ok := mask.Mask(val); ok {
+			out = append(out, m)
+		}
+		if len(out) == 3 {
+			break
+		}
+	}
+	return out
 }
 
 // maskedForFingerprint маскирует значения пула для отпечатка (п. 7.6:
@@ -953,6 +982,13 @@ func (e *Engine) verifyGray(ctx context.Context, col connector.Column, pool *sam
 		LatencyMS: int64(latency / time.Millisecond),
 		Status:    "ok",
 	})
+	// объяснение верификатора — в evidence (S8-6).
+	if v.Evidence == nil {
+		v.Evidence = map[string]any{}
+	}
+	v.Evidence["llm_verify"] = map[string]any{
+		"verdict": vr.Verdict, "label": vr.Label, "confidence": vr.Confidence, "reason_ru": vr.ReasonRU,
+	}
 	*out = ensemble.ApplyVerifier(*out, ensemble.VerifierOutcome{
 		Verdict: vr.Verdict, Label: verdict.Label(vr.Label), Confidence: vr.Confidence,
 	}, e.cfg.TauAccept)

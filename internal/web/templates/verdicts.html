@@ -29,7 +29,7 @@
 <p>Всего под фильтром: {{.Total}} · страница {{.Page}} из {{.Pages}}</p>
 <div id="vtable">
 <table>
-  <tr><th>Таблица</th><th>Путь</th><th>Лейбл</th><th>Чувствит.</th><th>Conf</th><th>Слой</th><th>Статус ревью</th></tr>
+  <tr><th>Таблица</th><th>Путь</th><th>Лейбл</th><th>Чувствит.</th><th>Conf</th><th>Слой</th><th>Статус ревью</th><th>Евиденс</th></tr>
   {{range .Verdicts}}
   <tr>
     <td>{{.Table}}</td><td>{{.Path}}</td>
@@ -39,6 +39,9 @@
     <td>{{.ReviewStatus}}
       {{if eq .ReviewStatus "pending"}} <a href="/review">→ ревью</a>{{end}}
     </td>
+    <td><details><summary>сэмпл · правила · LLM</summary>
+      {{range evlines .}}<div class="ev">{{.}}</div>{{end}}
+    </details></td>
   </tr>
   {{end}}
 </table>

@@ -1,6 +1,7 @@
 {{template "header" .}}
 {{if .Runner}}
 <form method="post" action="/scans/start" class="startform">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}"> <!-- классическая форма: токен полем, не заголовком (S8-6) -->
   <select name="source">
     {{range .Sources}}<option value="{{.}}">{{.}}</option>{{end}}
   </select>

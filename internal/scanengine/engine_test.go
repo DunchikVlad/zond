@@ -6,6 +6,7 @@ import (
 	"iter"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/DunchikVlad/zond/internal/agentproxy"
@@ -276,8 +277,8 @@ func (f *fakeLLMClassifier) Verify(ctx context.Context, candidate, nativeType st
 func TestGrayCorridorLLMEscalation(t *testing.T) {
 	eng, st := testEngine(t)
 	llm := &fakeLLMClassifier{
-		classifyResult: &agentproxy.ClassifyResult{Label: "PHONE", Confidence: 0.65, Sensitivity: "PII", PromptVersion: "1"},
-		verifyResult:   &agentproxy.VerifyResult{Verdict: "confirm", Label: "PHONE", Confidence: 0.85},
+		classifyResult: &agentproxy.ClassifyResult{Label: "PHONE", Confidence: 0.65, Sensitivity: "PII", PromptVersion: "1", ReasonRU: "номера мобильных, маскированы"},
+		verifyResult:   &agentproxy.VerifyResult{Verdict: "confirm", Label: "PHONE", Confidence: 0.85, ReasonRU: "согласен — маскированные остатки совпадают"},
 	}
 	eng.SetLLM(llm, LLMIdentity{AgentID: "zond-main", Model: "gpt-4o-mini"})
 	_, vs := scanAndList(t, eng, st, testSource())
@@ -285,6 +286,15 @@ func TestGrayCorridorLLMEscalation(t *testing.T) {
 	v := vs["users/phone"]
 	if llm.classifyCalls == 0 {
 		t.Error("LLM-классификатор не вызван в сером коридоре")
+	}
+	// S8-6: объяснения LLM и верификатора — в evidence вердикта.
+	llmEv, ok := v.Evidence["llm"].(map[string]any)
+	if !ok || llmEv["reason_ru"] != "номера мобильных, маскированы" || llmEv["model"] != "gpt-4o-mini" {
+		t.Fatalf("evidence llm: %+v", v.Evidence["llm"])
+	}
+	verEv, ok := v.Evidence["llm_verify"].(map[string]any)
+	if !ok || verEv["verdict"] != "confirm" || verEv["reason_ru"] != "согласен — маскированные остатки совпадают" {
+		t.Fatalf("evidence llm_verify: %+v", v.Evidence["llm_verify"])
 	}
 	// после confirm верификатора: confidence+0.1, auto_accepted, слой llm
 	if v.ReviewStatus != verdict.StatusAutoAccepted || v.Label != "PHONE" {
@@ -379,3 +389,35 @@ func (s *stringsBuilder) Write(p []byte) (int, error) {
 }
 
 func (s *stringsBuilder) Len() int { return len(s.b) }
+
+// TestVerdictEvidenceExamples — маскированные примеры сэмпла в evidence
+// (S8-6): значения идут в UI только в маскированном виде (ADR-0010).
+func TestVerdictEvidenceExamples(t *testing.T) {
+	eng, st := testEngine(t)
+	_, vs := scanAndList(t, eng, st, testSource())
+
+	v := vs["users/email"]
+	sample, ok := v.Evidence["sample"].(map[string]any)
+	if !ok {
+		t.Fatalf("evidence sample отсутствует: %+v", v.Evidence)
+	}
+	ex, ok := sample["examples"].([]any)
+	if !ok || len(ex) == 0 {
+		t.Fatalf("examples пусты: %+v", sample)
+	}
+	first, _ := ex[0].(string)
+	if strings.Contains(first, "ivan@example.com") || strings.Contains(first, "petr@test.io") {
+		t.Fatalf("example без маски: %q", first)
+	}
+	if len(ex) > 3 {
+		t.Fatalf("examples больше 3: %d", len(ex))
+	}
+	// rules-евиденс присутствует и читаемо
+	rules, ok := v.Evidence["rules"].(map[string]any)
+	if !ok || len(rules) == 0 {
+		t.Fatalf("rules отсутствуют: %+v", v.Evidence)
+	}
+	if _, ok := rules["rules/email"].(map[string]any); !ok {
+		t.Fatalf("rules/email не найдено: %+v", rules)
+	}
+}

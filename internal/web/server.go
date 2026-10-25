@@ -8,6 +8,7 @@
 package web
 
 import (
+	"context"
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -75,6 +77,8 @@ func New(st *store.Store, log *slog.Logger, sessions *auth.SessionStore, authEna
 		"conf": func(f float64) string { return fmt.Sprintf("%.2f", f) },
 		"add":  func(a, b int) int { return a + b },
 		"sub":  func(a, b int) int { return a - b },
+		// evlines — строки evidence для детализации вердикта (S8-6).
+		"evlines": evidenceLines,
 	}).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("web: шаблоны: %w", err)
@@ -123,12 +127,21 @@ func (s *Server) withSecurity(next http.Handler) http.Handler {
 // CSRF double-submit (blueprint п. 14: CSRF-токены во всех HTMX-мутациях):
 // cookie zond_csrf (не HttpOnly — читает JS-инициализация в _header.html)
 // + обязательный заголовок X-CSRF-Token с тем же значением на любой
-// не-GET-запрос. Расхождение/отсутствие → 403. SameSite=Lax на cookie
-// добавляет второй слой (cross-site POST не несёт cookie).
+// не-GET-запрос. Классические HTML-формы (не HTMX) передают токен hidden-
+// полем csrf_token — middleware принимает его как равнозначную пару
+// (S8-6: форма запуска скана слала POST без заголовка и получала 403).
+// Расхождение/отсутствие → 403. SameSite=Lax на cookie добавляет второй
+// слой (cross-site POST не несёт cookie).
 const (
 	csrfCookie = "zond_csrf"
 	csrfHeader = "X-CSRF-Token"
+	csrfField  = "csrf_token"
 )
+
+// csrfCtxKey — свежесгенерированный токен middleware кладёт в контекст,
+// чтобы рендереры могли вписать его в hidden-поле формы (в запросе его
+// ещё нет — cookie выставляется ответом).
+type csrfCtxKey struct{}
 
 func (s *Server) withCSRF(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -144,15 +157,32 @@ func (s *Server) withCSRF(next http.Handler) http.Handler {
 				Name: csrfCookie, Value: tok, Path: "/",
 				SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
 			})
+			r = r.WithContext(context.WithValue(r.Context(), csrfCtxKey{}, tok))
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
-			if r.Header.Get(csrfHeader) != tok || tok == "" {
+			sent := r.Header.Get(csrfHeader)
+			if sent == "" {
+				sent = r.FormValue(csrfField) // классическая форма (не HTMX)
+			}
+			if sent != tok || tok == "" {
 				s.renderError(w, http.StatusForbidden, "CSRF-токен отсутствует или неверен — обновите страницу")
 				return
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// csrfToken — токен для рендера форм: свежесгенерированный из контекста
+// либо присланный клиентом cookie.
+func (s *Server) csrfToken(r *http.Request) string {
+	if v, ok := r.Context().Value(csrfCtxKey{}).(string); ok && v != "" {
+		return v
+	}
+	if c, err := r.Cookie(csrfCookie); err == nil {
+		return c.Value
+	}
+	return ""
 }
 
 // withAuth — субъект запроса: dev-режим (SSO выключен) → admin "dev";
@@ -261,6 +291,7 @@ func (s *Server) handleScans(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, "scans.html", map[string]any{
 		"Subject": s.subject(r), "Title": "Прогоны", "Scans": rows,
 		"Total": total, "Sources": sources, "Runner": s.runner != nil,
+		"CSRF": s.csrfToken(r), // hidden-поле формы запуска (S8-6)
 	})
 }
 
@@ -384,6 +415,8 @@ func (s *Server) taxonomyLabels() []string {
 // evidenceLines — безопасное строковое представление evidence карточки
 // ревью: только известные ключи и статистика (ADR-0010: значения уже
 // маскированы по построению; сырых значений в evidence нет по дизайну).
+// S8-6: человекочитаемый рендер правил, примеров сэмпла и объяснений LLM
+// (reason_ru вердикта и верификатора теперь хранятся в evidence движком).
 func evidenceLines(v verdict.Verdict) []string {
 	var lines []string
 	add := func(k, val string) { lines = append(lines, k+": "+val) }
@@ -398,17 +431,48 @@ func evidenceLines(v verdict.Verdict) []string {
 	}
 	if lc, ok := v.Evidence["llm_cache"].(map[string]any); ok {
 		if lc["hit"] == true {
-			add("кэш LLM", "вердикт из кэша (п. 10.5)")
+			add("кэш LLM", "вердикт из кэша (п. 10.5); объяснение кэшем не сохраняется")
 		}
+	}
+	if llm, ok := v.Evidence["llm"].(map[string]any); ok {
+		add("LLM", fmt.Sprintf("%v: %v", llm["model"], llm["reason_ru"]))
+	}
+	if lv, ok := v.Evidence["llm_verify"].(map[string]any); ok {
+		add("верификатор", fmt.Sprintf("%v %v (conf %v): %v",
+			lv["verdict"], lv["label"], lv["confidence"], lv["reason_ru"]))
 	}
 	if sample, ok := v.Evidence["sample"].(map[string]any); ok {
-		add("сэмпл", fmt.Sprintf("значений %v, null %v из %v",
-			sample["values"], sample["nulls"], sample["total"]))
+		line := fmt.Sprintf("значений %v, null %v из %v",
+			sample["values"], sample["nulls"], sample["total"])
+		if ex, ok := sample["examples"].([]any); ok && len(ex) > 0 {
+			parts := make([]string, 0, len(ex))
+			for _, e := range ex {
+				if s, ok := e.(string); ok {
+					parts = append(parts, strconv.Quote(truncate(s, 40)))
+				}
+			}
+			if len(parts) > 0 {
+				line += " · примеры: " + strings.Join(parts, ", ")
+			}
+		}
+		add("сэмпл", line)
 	}
 	if rules, ok := v.Evidence["rules"].(map[string]any); ok && len(rules) > 0 {
-		if b, err := json.Marshal(rules); err == nil {
-			add("rules", truncate(string(b), 240))
+		keys := make([]string, 0, len(rules))
+		for k := range rules {
+			keys = append(keys, k)
 		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			m, _ := rules[k].(map[string]any)
+			p := fmt.Sprintf("%v %v/%v", k, m["matched"], m["total"])
+			if m["checksum"] == true {
+				p += " (checksum)"
+			}
+			parts = append(parts, p)
+		}
+		add("правила", strings.Join(parts, "; "))
 	}
 	return lines
 }
