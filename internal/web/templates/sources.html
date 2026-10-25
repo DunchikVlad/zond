@@ -1,0 +1,56 @@
+{{template "header" .}}
+{{if .Msg}}<p class="msg">{{.Msg}}</p>{{end}}
+
+<p class="ev">Правка connections.yaml через UI: применяется сразу (без рестарта) —
+перечитывается конфиг, перестраиваются расписания пересканов. Перед записью
+создаётся файл <code>.bak</code>. Пароль в строке подключения — только как
+<code>${ENV_NAME}</code> (blueprint п. 12): значение переменной задаётся в
+окружении сервиса (на стенде — /opt/zond/zond.env) и требует рестарта,
+если переменная новая.</p>
+
+<h2>Источники</h2>
+<table>
+  <tr><th>Имя</th><th>Тип</th><th>Подключение</th><th>Расписание перескана</th><th>Окно сканирования</th><th></th></tr>
+  {{range .Sources}}
+  <tr>
+    <form method="post" action="/sources/save">
+    <td><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <input name="name" value="{{.Name}}" size="14" {{if .Name}}readonly{{end}}></td>
+    <td><select name="type">
+      <option value="clickhouse" {{if eq .Type "clickhouse"}}selected{{end}}>clickhouse</option>
+      <option value="mongodb" {{if eq .Type "mongodb"}}selected{{end}}>mongodb</option>
+    </select></td>
+    <td><input name="dsn" value="{{.DSN}}" size="34" placeholder="clickhouse://user:${ENV}@host:9000/db">
+        <input name="uri" value="{{.URI}}" size="34" placeholder="mongodb://user:${ENV}@host:27017/db"></td>
+    <td><input name="schedule" value="{{.Schedule}}" size="12" placeholder="0 2 * * *"></td>
+    <td><input name="scan_window" value="{{.ScanWindow}}" size="12" placeholder="02:00-06:00"></td>
+    <td>
+      <button type="submit">Сохранить</button>
+      <button hx-post="/sources/test" hx-include="closest tr" hx-target="#test-{{.Name}}"
+              type="button">Проверить</button>
+    </td>
+    </form>
+    <td><form method="post" action="/sources/{{.Name}}/delete" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+      <button type="submit" class="danger" hx-confirm="Удалить источник {{.Name}}?">Удалить</button>
+    </form></td>
+  </tr>
+  <tr><td colspan="6" id="test-{{.Name}}"></td></tr>
+  {{end}}
+</table>
+
+<h2>Добавить источник</h2>
+<form method="post" action="/sources/save" class="startform">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <input name="name" placeholder="имя (a-z 0-9 _ -)" required>
+  <select name="type">
+    <option value="clickhouse">clickhouse</option>
+    <option value="mongodb">mongodb</option>
+  </select>
+  <input name="dsn" placeholder="clickhouse://user:${ENV}@host:9000/db" size="40">
+  <input name="uri" placeholder="mongodb://user:${ENV}@host:27017/db" size="40">
+  <input name="schedule" placeholder="расписание cron, напр. 0 2 * * *" size="14">
+  <input name="scan_window" placeholder="окно HH:MM-HH:MM" size="12">
+  <button type="submit">Добавить</button>
+</form>
+{{template "footer" .}}

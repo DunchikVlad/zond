@@ -128,20 +128,16 @@ func TestSchedulerScanWindowDeferredClockStillOutside(t *testing.T) {
 	}
 	// К моменту срабатывания таймера часы «откатились»: всё ещё вне окна.
 	// Ждём повторного откладывания: новый таймер вместо старта.
-	deadline := time.Now().Add(4 * time.Second)
-	for time.Now().Before(deadline) {
-		if sch.timerCount() > 0 && runner.calls() == 0 && !hasDeferredAudit(t, st, "ch-win") {
-			t.Fatal("внутреннее нарушение: deferral без аудита")
-		}
-		if sch.timerCount() > 0 && runner.calls() == 0 {
-			// таймер перевыставлен (старый отработал и удалился, новый добавлен)
-			time.Sleep(30 * time.Millisecond)
-		}
-		if runner.calls() > 0 {
-			t.Fatal("старт вне окна: повторная проверка окна не сработала")
-		}
-		// выходим, когда первый таймер точно сработал: появился второй deferral-аудит? — достаточно отсутствия старта
-		break
+	// (цикл был однократным — break в конце тела; SA4004, приведён к блоку)
+	if sch.timerCount() > 0 && runner.calls() == 0 && !hasDeferredAudit(t, st, "ch-win") {
+		t.Fatal("внутреннее нарушение: deferral без аудита")
+	}
+	if sch.timerCount() > 0 && runner.calls() == 0 {
+		// таймер перевыставлен (старый отработал и удалился, новый добавлен)
+		time.Sleep(30 * time.Millisecond)
+	}
+	if runner.calls() > 0 {
+		t.Fatal("старт вне окна: повторная проверка окна не сработала")
 	}
 	if runner.calls() != 0 {
 		t.Fatal("старт вне окна при сдвиге часов")
@@ -188,4 +184,41 @@ func TestSchedulerNoWindowUnchanged(t *testing.T) {
 	if runner.calls() != 1 {
 		t.Fatalf("источник без окна: calls=%d, ожидалось 1", runner.calls())
 	}
+}
+
+// TestReplaceSources — S8-7: горячая замена источников пересобирает
+// расписания пересканов без рестарта.
+func TestReplaceSources(t *testing.T) {
+	runner := &fakeStarter{}
+	s := New(nil, runner, nil, []config.Source{
+		{Name: "a", Type: "clickhouse", Schedule: "0 2 * * *", ScanWindow: "02:00-06:00"},
+		{Name: "b", Type: "mongodb", Schedule: "0 3 * * *"},
+	})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+	if got := len(s.cron.Entries()); got != 2+2 { // 2 перескана + cache/retention
+		t.Fatalf("entries до ReplaceSources: %d", got)
+	}
+	// b удалён, расписание a изменено, c добавлен — всё без рестарта.
+	s.ReplaceSources([]config.Source{
+		{Name: "a", Type: "clickhouse", Schedule: "*/15 * * * *"},
+		{Name: "c", Type: "mongodb", Schedule: "30 4 * * *", ScanWindow: "04:00-05:00"},
+	})
+	entries := s.cron.Entries()
+	if got := len(entries); got != 2+2 {
+		t.Fatalf("entries после ReplaceSources: %d", got)
+	}
+	s.mu.Lock()
+	if _, ok := s.windows["c"]; !ok {
+		t.Fatal("окно c не подхвачено")
+	}
+	if _, ok := s.windows["a"]; ok {
+		t.Fatal("окно a не снято")
+	}
+	if len(s.rescanEntries) != 2 {
+		t.Fatalf("rescanEntries: %d", len(s.rescanEntries))
+	}
+	s.mu.Unlock()
 }

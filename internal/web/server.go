@@ -56,11 +56,50 @@ type Server struct {
 	cfg         *config.Bundle
 	tmpl        *template.Template
 	nowFn       func() time.Time
+
+	// Инкремент S8-7: управление источниками из UI. conns — горячий
+	// провайдер connections (заменяется serve после правки файла); connsPath
+	// — редактируемый connections.yaml; applyConns — запись файла и
+	// применение к процессу (atomic swap + scheduler), возвращает новый
+	// разобранный конфиг. В тестах все три nil — используется s.cfg.
+	conns      func() *config.Connections
+	connsPath  string
+	applyConns func(entry config.SourceEntry) (*config.Connections, error)
+}
+
+// Option — настройка Server (S8-7: провайдеры конфигурации для /sources).
+type Option func(*Server)
+
+// WithConns — горячий провайдер connections (после правки файла из UI).
+func WithConns(fn func() *config.Connections) Option {
+	return func(s *Server) { s.conns = fn }
+}
+
+// WithConnsPath — путь к редактируемому connections.yaml.
+func WithConnsPath(path string) Option {
+	return func(s *Server) { s.connsPath = path }
+}
+
+// WithApplyConns — колбэк «сохранить запись и применить»: serve пишет файл
+// через SourceEditor, перечитывает конфиг, меняет atomic-провайдер и
+// перестраивает расписания scheduler'а.
+func WithApplyConns(fn func(entry config.SourceEntry) (*config.Connections, error)) Option {
+	return func(s *Server) { s.applyConns = fn }
+}
+
+// connsCurrent — текущий connections: горячий провайдер или стартовый cfg.
+func (s *Server) connsCurrent() *config.Connections {
+	if s.conns != nil {
+		if c := s.conns(); c != nil {
+			return c
+		}
+	}
+	return s.cfg.Connections
 }
 
 // New собирает UI. cfg — загруженный конфиг (источники/агенты/таксономия для
 // /settings и форм). runner nil → старт/стоп недоступны (501).
-func New(st *store.Store, log *slog.Logger, sessions *auth.SessionStore, authEnabled bool, runner ScanRunner, cfg *config.Bundle) (*Server, error) {
+func New(st *store.Store, log *slog.Logger, sessions *auth.SessionStore, authEnabled bool, runner ScanRunner, cfg *config.Bundle, opts ...Option) (*Server, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -83,8 +122,12 @@ func New(st *store.Store, log *slog.Logger, sessions *auth.SessionStore, authEna
 	if err != nil {
 		return nil, fmt.Errorf("web: шаблоны: %w", err)
 	}
-	return &Server{st: st, log: log, sessions: sessions, authEnabled: authEnabled,
-		runner: runner, cfg: cfg, tmpl: tmpl, nowFn: time.Now}, nil
+	srv := &Server{st: st, log: log, sessions: sessions, authEnabled: authEnabled,
+		runner: runner, cfg: cfg, tmpl: tmpl, nowFn: time.Now}
+	for _, opt := range opts {
+		opt(srv)
+	}
+	return srv, nil
 }
 
 // Handler — корневой handler (middleware: security-заголовки → auth → mux).
@@ -106,6 +149,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /alerts", s.handleAlerts)
 	mux.HandleFunc("GET /audit", s.requireRole(auth.ActionAudit, s.handleAudit))
 	mux.HandleFunc("GET /settings", s.handleSettings)
+	// S8-7: управление источниками и расписаниями пересканов (только admin).
+	mux.HandleFunc("GET /sources", s.requireRole(auth.ActionManage, s.handleSources))
+	mux.HandleFunc("POST /sources/save", s.requireRole(auth.ActionManage, s.handleSourceSave))
+	mux.HandleFunc("POST /sources/{name}/delete", s.requireRole(auth.ActionManage, s.handleSourceDelete))
+	mux.HandleFunc("POST /sources/test", s.requireRole(auth.ActionManage, s.handleSourceTest))
 	return s.withAuth(s.withCSRF(s.withSecurity(mux)))
 }
 
@@ -284,8 +332,8 @@ func (s *Server) handleScans(w http.ResponseWriter, r *http.Request) {
 	for _, sc := range scans {
 		rows = append(rows, row{Scan: sc, Progress: scanProgress(sc.StatsJSON)})
 	}
-	sources := make([]string, 0, len(s.cfg.Connections.Sources))
-	for _, src := range s.cfg.Connections.Sources {
+	sources := make([]string, 0, len(s.connsCurrent().Sources))
+	for _, src := range s.connsCurrent().Sources {
 		sources = append(sources, src.Name)
 	}
 	s.render(w, http.StatusOK, "scans.html", map[string]any{
@@ -557,8 +605,8 @@ func (s *Server) renderReviewQueue(w http.ResponseWriter, r *http.Request, statu
 
 func (s *Server) handleDrift(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	sources := make([]string, 0, len(s.cfg.Connections.Sources))
-	for _, src := range s.cfg.Connections.Sources {
+	sources := make([]string, 0, len(s.connsCurrent().Sources))
+	for _, src := range s.connsCurrent().Sources {
 		sources = append(sources, src.Name)
 	}
 	source := r.URL.Query().Get("source")
@@ -648,8 +696,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	type srcView struct {
 		Name, Type string
 	}
-	srcs := make([]srcView, 0, len(s.cfg.Connections.Sources))
-	for _, src := range s.cfg.Connections.Sources {
+	srcs := make([]srcView, 0, len(s.connsCurrent().Sources))
+	for _, src := range s.connsCurrent().Sources {
 		srcs = append(srcs, srcView{Name: src.Name, Type: src.Type})
 	}
 	s.render(w, http.StatusOK, "settings.html", map[string]any{

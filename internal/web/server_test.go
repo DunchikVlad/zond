@@ -1,11 +1,13 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/config"
 	"github.com/DunchikVlad/zond/internal/verdict"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
+	"gopkg.in/yaml.v3"
 )
 
 // Тесты веб-UI (инкремент 5г, п. 11.3): рендер страниц, auth/RBAC,
@@ -410,5 +413,143 @@ func TestEvidenceLinesS86(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("нет строки %q в:\n%s", want, joined)
 		}
+	}
+}
+
+// TestSourcesManage — S8-7: страница /sources admin-only; сохранение пишет
+// connections.yaml (через SourceEditor), вызывает applyConns и аудирует.
+func TestSourcesManage(t *testing.T) {
+	st := fixtureStore(t)
+	sessions := auth.NewSessionStore(0)
+	dir := t.TempDir()
+	connsPath := filepath.Join(dir, "connections.yaml")
+	fixture := `version: "1"
+
+sources:
+  - name: ch-test
+    type: clickhouse
+    dsn: "clickhouse://test:${CH_TEST_PASSWORD}@192.168.31.119:9000/default"
+    schedule: "0 2 * * *"
+
+sso:
+  enabled: false
+`
+	if err := os.WriteFile(connsPath, []byte(fixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var applied []string
+	srv, err := New(st, nil, sessions, true, &fakeRunner{}, testBundle(),
+		WithConnsPath(connsPath),
+		WithApplyConns(func(e config.SourceEntry) (*config.Connections, error) {
+			applied = append(applied, e.Name)
+			var c config.Connections
+			yamlUnmarshalStrict(t, connsPath, &c)
+			return &c, nil
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+
+	admin := sessions.Create("admin@example.com", auth.RoleAdmin)
+	viewer := sessions.Create("viewer@example.com", auth.RoleViewer)
+	post := func(cookie *http.Cookie, form url.Values) int {
+		form.Set("csrf_token", testCSRFToken)
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/sources/save", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(cookie)
+		addCSRF(req)
+		resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// RBAC: viewer не проходит.
+	if code := post(&http.Cookie{Name: auth.SessionCookie, Value: viewer.ID}, url.Values{
+		"name": {"x"}, "type": {"clickhouse"}, "dsn": {"clickhouse://u:${PW}@h/db"}}); code != http.StatusForbidden {
+		t.Fatalf("viewer save: %d (ожидался 403)", code)
+	}
+
+	// admin: добавление источника с расписанием и окном.
+	form := url.Values{
+		"name": {"mongo-stand"}, "type": {"mongodb"},
+		"uri":      {"mongodb://test:${MONGO_TEST_PASSWORD}@192.168.31.119:27017/testdb"},
+		"schedule": {"*/30 * * * *"}, "scan_window": {"01:00-05:00"},
+	}
+	if code := post(&http.Cookie{Name: auth.SessionCookie, Value: admin.ID}, form); code != http.StatusSeeOther {
+		t.Fatalf("admin save: %d (ожидался 303)", code)
+	}
+	if len(applied) != 1 || applied[0] != "mongo-stand" {
+		t.Fatalf("applyConns не вызван корректно: %v", applied)
+	}
+	e, err := config.OpenSourceEditor(connsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcs, _ := e.Sources()
+	if len(srcs) != 2 {
+		t.Fatalf("источников после save: %d", len(srcs))
+	}
+	if srcs[1].Schedule != "*/30 * * * *" || srcs[1].ScanWindow != "01:00-05:00" {
+		t.Fatalf("расписание/окно не записаны: %+v", srcs[1])
+	}
+	// обновление расписания существующего
+	upd := url.Values{
+		"name": {"ch-test"}, "type": {"clickhouse"},
+		"dsn":      {"clickhouse://test:${CH_TEST_PASSWORD}@192.168.31.119:9000/default"},
+		"schedule": {"15 3 * * *"},
+	}
+	if code := post(&http.Cookie{Name: auth.SessionCookie, Value: admin.ID}, upd); code != http.StatusSeeOther {
+		t.Fatalf("admin update: %d", code)
+	}
+	e, err = config.OpenSourceEditor(connsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcs, _ = e.Sources()
+	if srcs[0].Schedule != "15 3 * * *" || len(srcs) != 2 {
+		t.Fatalf("update сломал файл: %+v", srcs)
+	}
+	// отказ: пароль в открытом виде
+	bad := url.Values{
+		"name": {"evil"}, "type": {"clickhouse"}, "dsn": {"clickhouse://u:secret@h/db"},
+	}
+	if code := post(&http.Cookie{Name: auth.SessionCookie, Value: admin.ID}, bad); code != http.StatusSeeOther {
+		t.Fatalf("bad save redirect: %d", code)
+	}
+	e2, _ := config.OpenSourceEditor(connsPath)
+	if srcs2, _ := e2.Sources(); len(srcs2) != 2 {
+		t.Fatalf("источник с открытым паролем записан: %+v", srcs2)
+	}
+	// аудит зафиксировал изменения
+	entries, err := st.AuditList(context.Background(), audit.Filter{Category: audit.CatAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := map[string]bool{}
+	for _, en := range entries {
+		actions[en.Action] = true
+	}
+	if !actions["source_add"] || !actions["source_update"] {
+		t.Fatalf("аудит изменений источников отсутствует: %v", actions)
+	}
+}
+
+// yamlUnmarshalStrict — строгий разбор файла для фейкового applyConns.
+func yamlUnmarshalStrict(t *testing.T, path string, out any) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil {
+		t.Fatalf("yaml decode %s: %v", path, err)
 	}
 }

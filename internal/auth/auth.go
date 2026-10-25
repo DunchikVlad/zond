@@ -43,6 +43,7 @@ const (
 	ActionReview Action = "review" // ручное ревью
 	ActionScan   Action = "scan"   // старт/стоп сканов
 	ActionAudit  Action = "audit"  // просмотр аудита (/audit, audit export)
+	ActionManage Action = "manage" // управление источниками/расписаниями (S8-7, только admin)
 )
 
 // rbac — матрица «действие × роль» (п. 11.3): admin может всё, viewer —
@@ -53,6 +54,7 @@ var rbac = map[Action]map[Role]bool{
 	ActionReview: {RoleAdmin: true},
 	ActionScan:   {RoleAdmin: true},
 	ActionAudit:  {RoleAdmin: true},
+	ActionManage: {RoleAdmin: true},
 }
 
 // Allows — RBAC-проверка: разрешено ли роли действие (п. 11.3).

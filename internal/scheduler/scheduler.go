@@ -94,6 +94,10 @@ type Scheduler struct {
 	// Инкремент S7б: периодическая копия БД (п. 15.2); пустой spec — выключено.
 	backupSpec string
 	backupDir  string
+
+	// Инкремент S8-7: EntryID пересканов по источникам — для замены
+	// расписаний без рестарта (при правке sources через UI).
+	rescanEntries map[string]cron.EntryID
 }
 
 // Option — настройка планировщика (в тестах — ускоренные расписания).
@@ -174,6 +178,7 @@ func New(st *store.Store, runner ScanStarter, log *slog.Logger, sources []config
 		retentionSpec: specRetention,
 		retentionAge:  retentionAge,
 		alertsSpec:    specAlerts,
+		rescanEntries: map[string]cron.EntryID{},
 	}
 	for _, o := range opts {
 		o(s)
@@ -206,23 +211,69 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		}
 	}
 	for _, src := range s.sources {
-		if src.Schedule == "" {
-			continue
-		}
-		name, spec := src.Name, src.Schedule
-		if _, err := c.AddFunc(spec, func() { s.rescan(ctx, name) }); err != nil {
-			// Не роняем старт: предупреждение + аудит, источник пропускается.
-			s.log.Warn("scheduler: невалидное расписание источника, перескан не настроен",
-				"source", name, "schedule", spec, "error", err)
-			s.audit(ctx, "scheduler/invalid_schedule", "source:"+name,
-				map[string]any{"source": name, "schedule": spec, "error": err.Error()})
-			continue
-		}
-		s.log.Info("scheduler: периодический перескан настроен", "source", name, "schedule", spec)
+		s.registerRescan(c, ctx, src)
 	}
+	s.mu.Lock()
 	s.cron = c
+	s.mu.Unlock()
 	c.Start()
 	return nil
+}
+
+// registerRescan — регистрация пересканов источника в cron; невалидное
+// расписание — warn + аудит, источник пропускается (не роняем старт).
+func (s *Scheduler) registerRescan(c *cron.Cron, ctx context.Context, src config.Source) {
+	if src.Schedule == "" {
+		return
+	}
+	name, spec := src.Name, src.Schedule
+	id, err := c.AddFunc(spec, func() { s.rescan(ctx, name) })
+	if err != nil {
+		s.log.Warn("scheduler: невалидное расписание источника, перескан не настроен",
+			"source", name, "schedule", spec, "error", err)
+		s.audit(ctx, "scheduler/invalid_schedule", "source:"+name,
+			map[string]any{"source": name, "schedule": spec, "error": err.Error()})
+		return
+	}
+	s.mu.Lock()
+	s.rescanEntries[name] = id
+	s.mu.Unlock()
+	s.log.Info("scheduler: периодический перескан настроен", "source", name, "schedule", spec)
+}
+
+// ReplaceSources — горячая замена списка источников после правки
+// connections.yaml через UI (S8-7): расписания пересканов пересобираются,
+// окна сканирования перечитываются. Работает и до Start (снапшот только).
+func (s *Scheduler) ReplaceSources(sources []config.Source) {
+	windows := map[string]config.Window{}
+	for _, src := range sources {
+		if src.ScanWindow == "" {
+			continue
+		}
+		if w, err := config.ParseWindow(src.ScanWindow); err == nil {
+			windows[src.Name] = w
+		} else {
+			s.log.Warn("scheduler: scan_window не разобран (источник без окна)", "source", src.Name, "error", err)
+		}
+	}
+	s.mu.Lock()
+	s.sources = sources
+	s.windows = windows
+	c := s.cron
+	if c == nil {
+		s.mu.Unlock()
+		return
+	}
+	for _, id := range s.rescanEntries {
+		c.Remove(id)
+	}
+	clear(s.rescanEntries)
+	s.mu.Unlock()
+	ctx := context.Background()
+	for _, src := range sources {
+		s.registerRescan(c, ctx, src)
+	}
+	s.log.Info("scheduler: источники обновлены", "count", len(sources))
 }
 
 // Stop останавливает cron, дожидаясь завершения начатых задач
@@ -239,7 +290,9 @@ func (s *Scheduler) Stop() {
 		return
 	}
 	s.cron.Stop()
+	s.mu.Lock()
 	s.cron = nil
+	s.mu.Unlock()
 }
 
 // purgeCache — прочистка просроченных записей verdict_cache (п. 15.4).
@@ -277,7 +330,10 @@ func (s *Scheduler) rescan(ctx context.Context, source string) {
 		s.log.Warn("scheduler: перескан невозможен — runner не подключён", "source", source)
 		return
 	}
-	if w, ok := s.windows[source]; ok {
+	s.mu.Lock()
+	w, hasWindow := s.windows[source]
+	s.mu.Unlock()
+	if hasWindow {
 		now := s.nowFn()
 		if !w.Contains(now) {
 			start := w.NextStart(now)

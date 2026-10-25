@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -491,10 +492,21 @@ type engineRunner struct {
 	useLLM   bool
 	resolver secrets.Resolver // ref-источников (Vault, ADR-0012); nil — режим ENV
 	breaker  *scanengine.Breaker
+	connsFn  func() *config.Connections // S8-7: горячий провайдер (UI-правка); nil — статика
 
 	mu       sync.Mutex
 	running  map[string]context.CancelFunc // scan_id → cancel
 	srcSlots map[string]chan struct{}      // source → семафор max_concurrent_scans (п. 13.2)
+}
+
+// conns — текущие connections (горячие при UI-правке, иначе из cfg).
+func (r *engineRunner) conns() *config.Connections {
+	if r.connsFn != nil {
+		if c := r.connsFn(); c != nil {
+			return c
+		}
+	}
+	return r.b.Connections
 }
 
 func newEngineRunner(b *config.Bundle, st *store.Store, log *slog.Logger, useLLM bool, resolver secrets.Resolver) *engineRunner {
@@ -511,7 +523,7 @@ func newEngineRunner(b *config.Bundle, st *store.Store, log *slog.Logger, useLLM
 // клиент получает осмысленную ошибку, а не «прогон умер в фоне».
 // actor — автор аудит-событий прогона (п. 14.2: sso:<subject>/token:<id>/api).
 func (r *engineRunner) Start(source, profile, actor string) (string, error) {
-	src, err := findSource(r.b.Connections, source)
+	src, err := findSource(r.conns(), source)
 	if err != nil {
 		return "", &api.BadScanRequestError{Reason: err.Error()}
 	}
@@ -659,6 +671,24 @@ func runServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "serve: конфигурация: %v\n", err)
 		return 2
 	}
+	// S8-7: горячий провайдер connections — после правки источников через UI
+	// (/sources) файл перечитывается, держатель меняется, расписания
+	// шедулера перестраиваются; действующие прогоны не трогаем.
+	var connsHot atomic.Pointer[config.Connections]
+	connsHot.Store(b.Connections)
+	connsPath := filepath.Join(*dir, "connections.yaml")
+	var sched *scheduler.Scheduler
+	applyConns := func(config.SourceEntry) (*config.Connections, error) {
+		c, err := config.LoadConnections(connsPath)
+		if err != nil {
+			return nil, err // файл записан, но не применён (например, новый ENV) — вступит после рестарта
+		}
+		connsHot.Store(c)
+		if sched != nil {
+			sched.ReplaceSources(c.Sources)
+		}
+		return c, nil
+	}
 	log := redactedLogger(b)
 	st, err := store.Open(*dbPath)
 	if err != nil {
@@ -680,6 +710,7 @@ func runServe(args []string) int {
 			"refs", len(b.Connections.Vault.Secrets))
 	}
 	runner := newEngineRunner(b, st, log, *useLLM, resolver)
+	runner.connsFn = connsHot.Load // S8-7: горячий список источников
 	// Аутентификация (инкремент 5в, п. 11.3/п. 14.2): включается sso.enabled
 	// в connections.yaml; admin-token fallback — env CLASSIFIER_ADMIN_TOKEN
 	// при admin_token_fallback=true (bootstrap/аварийный доступ).
@@ -750,7 +781,11 @@ func runServe(args []string) int {
 	// Веб-UI (инкремент 5г, п. 11.3): корневой mux — /api/ и /saml/ у
 	// API-сервера, всё остальное (страницы) — у web-сервера (ADR-0007,
 	// server-rendered + HTMX из embed.FS).
-	webSrv, err := web.New(st, log, sessions, b.Connections.SSO.Enabled, runner, b)
+	webSrv, err := web.New(st, log, sessions, b.Connections.SSO.Enabled, runner, b,
+		web.WithConns(connsHot.Load),
+		web.WithConnsPath(connsPath),
+		web.WithApplyConns(applyConns),
+	)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "serve: web:", err)
 		return 2
@@ -784,7 +819,7 @@ func runServe(args []string) int {
 		// Расписание копий Verdict Store (п. 15.2): VACUUM INTO в backup.dir.
 		schedOpts = append(schedOpts, scheduler.WithBackup(b.Connections.Backup.Schedule, b.Connections.Backup.Dir))
 	}
-	sched := scheduler.New(st, runner, log, b.Connections.Sources, schedOpts...)
+	sched = scheduler.New(st, runner, log, b.Connections.Sources, schedOpts...)
 	if *useSched {
 		if err := sched.Start(context.Background()); err != nil {
 			fmt.Fprintln(os.Stderr, "serve: scheduler:", err)
