@@ -253,11 +253,11 @@ scan:
 ```yaml
 agents:
   - id: zond-main
-    endpoint: https://api.example/v1/chat
-    model: gpt-4o-mini
-    api_key_env: LLM_MAIN_KEY      # имя env-переменной, не сам ключ
+    endpoint: https://api.moonshot.ai/v1/chat/completions # Kimi (Moonshot AI), OpenAI-совместимый (S8-5)
+    model: kimi-k2.6
+    api_key_env: KIMI_API_KEY      # имя env-переменной, не сам ключ
     max_values_per_call: 25
-    timeout_s: 30
+    timeout_s: 60
     max_retries: 3
     confidence_band: [0.30, 0.70]  # вызывать только в «серой зоне»
     escalate_to: zond-strong # необязательный второй агент-верификатор
@@ -655,7 +655,7 @@ sso:                            # веб-UI: вход через корпора�
   Mongo — роль `read` на целевые БД; ограничение network-ACL снаружи.
 - `detectors.yaml` — слои 0–1 (словари, recognizer'ы, пороги), реестр агентов
   (п. 5.3), веса ансамбля, `cost_scan_limit_usd`, маск-профиль.
-- Пример переменных: `LLM_MAIN_KEY`, `CH_PROD_PASSWORD`, `MONGO_PROD_URI`,
+- Пример переменных: `KIMI_API_KEY`, `CH_PROD_PASSWORD`, `MONGO_PROD_URI`,
   `CLASSIFIER_ADMIN_TOKEN`.
 
 `detectors.yaml` перечитывается без рестарта (ADR-0014): каждая правка

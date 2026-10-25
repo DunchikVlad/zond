@@ -33,26 +33,31 @@ proxy:
   cost_scan_limit_usd: 5 # budget-стоп скана со статусом budget_exceeded (0 — без лимита)
 
 agents:
+  # Kimi (Moonshot AI) — OpenAI-совместимый Chat Completions
+  # (https://api.moonshot.ai/v1/chat/completions, S8-5). Запрос без
+  # temperature (Moonshot отклоняет значения ≠ 1 — прокси не шлёт поле).
+  # Маскирование значений — ADR-0010 (перед отправкой). Ключ — env KIMI_API_KEY.
   - id: zond-main
-    endpoint: https://api.example/v1/chat
-    model: gpt-4o-mini
-    api_key_env: LLM_MAIN_KEY # имя env-переменной, не ключ
+    endpoint: https://api.moonshot.ai/v1/chat/completions
+    model: kimi-k2.6
+    api_key_env: KIMI_API_KEY # имя env-переменной, не ключ
     max_values_per_call: 25
-    timeout_s: 30
+    timeout_s: 60
     max_retries: 3
     confidence_band: [0.30, 0.70] # вызывать только в «серой зоне»
     escalate_to: zond-strong
     # Egress-политика (п. 10.7): публичный эндпоинт разрешён только явной
     # записью в allowlist (IP, CIDR или hostname), иначе — только loopback/RFC 1918.
-    # allowlist: ["203.0.113.10/32", "llm.corp.example"]
+    allowlist: ["api.moonshot.ai"]
+  # Верификатор эскалаций (п. 5.3): та же платформа; при необходимости
+  # укажите более сильную модель (например, kimi-k2.5 с иным соотношением
+  # цена/качество — прайс п. 11.1 вводится оператором в model_prices).
   - id: zond-strong
-    endpoint: https://api.example/v1/chat
-    model: gpt-4o
-    api_key_env: LLM_STRONG_KEY
+    endpoint: https://api.moonshot.ai/v1/chat/completions
+    model: kimi-k2.6
+    api_key_env: KIMI_API_KEY
     max_values_per_call: 25
-    timeout_s: 60
+    timeout_s: 90
     max_retries: 3
     confidence_band: [0.30, 0.70]
-    # Egress-политика Agent Proxy (blueprint п. 10.7): внешние эндпоинты
-    # разрешены только явной записью в allowlist — не в этом файле.
-    # allowlist: ["203.0.113.10/32"]
+    allowlist: ["api.moonshot.ai"]
