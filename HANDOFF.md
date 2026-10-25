@@ -79,6 +79,27 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
+Снимок от 2026-10-25 ~14:00 UTC (сессия S8-5/S8-6 — Kimi-интеграция +
+CSRF-фикс + евиденс вердиктов; HEAD `fd2c4fa` = origin/main):
+
+- **S8-6 (CSRF-фикс + евиденс) запушен и ПРОВЕРЕН НА СТЕНДЕ** (`76b0d5a`):
+  баг «CSRF-токен отсутствует» при запуске скана из UI (классическая форма
+  без заголовка) — middleware принимает токен hidden-полем csrf_token;
+  живой прогон: форма 302 → скан запущен. Евиденс вердиктов: sample.examples
+  (≤3 маскированных, ADR-0010), evidence.llm/llm_verify (reason_ru, агент,
+  модель); /verdicts — колонка «Евиденс» с раскрытием, live-HTML содержит
+  примеры и rules/* matched/total. На .113 работает сборка 76b0d5a.
+- **S8-5 (Kimi) — интеграция готова, живой прогон ЗАБЛОКИРОВАН балансом**
+  (`4d7b222`): реестр агентов → api.moonshot.ai/v1/chat/completions,
+  model kimi-k2.6, api_key_env KIMI_API_KEY, allowlist [api.moonshot.ai];
+  ci.env обновлён. Ключ пользователя записан на стенде (/opt/zond/zond.env,
+  mode 600), но аккаунт suspended (insufficient balance) — ждёт пополнения
+  platform.kimi.com. Конформанс пути проверен fake-LLM: eval 1000 колонок —
+  78 обращений (24 классификации, 54 small_sample by design), токены и $
+  учтены. После пополнения: `zond scan -source ch-test -llm` на .113 и
+  `go run ./cmd/eval run -llm -price-in 3 -price-out 15`.
+- Прошлый снимок (проверка чужих S8-2/8-3/8-4 на стенде): см. ниже.
+
 Снимок от 2026-10-25 ~08:10 UTC (сессия проверки: работа агента S8-2/8-3/
 8-4 **подтверждена на живом стенде**, HEAD `b9fbd9e` = origin/main):
 
