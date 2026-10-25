@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/DunchikVlad/zond/internal/audit"
@@ -165,8 +166,11 @@ func (s *Server) handleSourceTest(w http.ResponseWriter, r *http.Request) {
 	if connStr == "" {
 		connStr = entry.URI
 	}
+	connStr = config.ExpandEnv(connStr) // ${ENV} → значения из окружения процесса (п. 12)
 	result := "OK"
-	if err := entry.Validate(); err != nil {
+	if strings.Contains(connStr, "${") {
+		result = "Не заданы переменные окружения в строке подключения: " + connStr
+	} else if err := entry.Validate(); err != nil {
 		result = "Ошибка валидации: " + err.Error()
 	} else if factory, ok := connector.Lookup(entry.Type); ok {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)

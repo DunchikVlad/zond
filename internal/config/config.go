@@ -69,6 +69,18 @@ func loadParsed(path string, out any) error {
 	return nil
 }
 
+// ExpandEnv раскрывает ${VAR} в строке через окружение процесса (п. 12).
+// Неразрешённые имена остаются как ${NAME} — вызывающий валидирует явно
+// (S8-7: кнопка «Проверить» в /sources тестирует реальное подключение).
+func ExpandEnv(s string) string {
+	return os.Expand(s, func(name string) string {
+		if v, ok := os.LookupEnv(name); ok {
+			return v
+		}
+		return "${" + name + "}"
+	})
+}
+
 // expandEnvInValue рекурсивно заменяет ${VAR} в строковых полях структуры.
 // Вложенные структуры внутри map не разворачиваются — в конфигах их нет.
 func expandEnvInValue(v reflect.Value, mapping func(string) string) {
