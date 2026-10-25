@@ -553,3 +553,106 @@ func yamlUnmarshalStrict(t *testing.T, path string, out any) {
 		t.Fatalf("yaml decode %s: %v", path, err)
 	}
 }
+
+// TestDetectorsSave — S8-8: форма детекторов на /settings: admin сохраняет,
+// файл переписан (Node-правка, валидация Detectors.Validate), applyDetectors
+// вызван, аудит есть; невалидное (tau_review >= tau_accept) отклонено.
+func TestDetectorsSave(t *testing.T) {
+	st := fixtureStore(t)
+	sessions := auth.NewSessionStore(0)
+	dir := t.TempDir()
+	detPath := filepath.Join(dir, "detectors.yaml")
+	fixture := `version: "1"
+
+scan:
+  profile: deep
+  sample: {mode: percent, value: 5, max_rows: 20000}
+
+ensemble:
+  tau_accept: 0.8
+  tau_review: 0.5
+  weights: {meta: 1.0, rules: 1.5, llm: 1.2}
+
+cluster: {similarity: 0.8, max_size: 100}
+
+proxy: {max_concurrent: 8, rate_limit_rps: 4, cost_scan_limit_usd: 5}
+
+agents: []
+`
+	if err := os.WriteFile(detPath, []byte(fixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	applied := 0
+	srv, err := New(st, nil, sessions, true, &fakeRunner{}, testBundle(),
+		WithDetectorsPath(detPath),
+		WithApplyDetectors(func() (*config.Detectors, error) { applied++; return nil, nil }),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	admin := sessions.Create("admin@example.com", auth.RoleAdmin)
+
+	post := func(form url.Values) int {
+		form.Set("csrf_token", testCSRFToken)
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/settings/detectors/save", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: admin.ID})
+		addCSRF(req)
+		resp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	good := url.Values{
+		"profile": {"quick"}, "tau_accept": {"0.85"}, "tau_review": {"0.4"},
+		"w_meta": {"1.1"}, "w_rules": {"1.6"}, "w_llm": {"1.3"},
+		"similarity": {"0.75"}, "max_size": {"120"},
+		"max_concurrent": {"6"}, "rate_limit_rps": {"2.5"}, "cost_scan_limit_usd": {"3"},
+	}
+	if code := post(good); code != http.StatusSeeOther {
+		t.Fatalf("save good: %d", code)
+	}
+	if applied != 1 {
+		t.Fatalf("applyDetectors: %d", applied)
+	}
+	de, err := config.OpenDetectorsEditor(detPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := de.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Profile != "quick" || v.TauAccept != 0.85 || v.WRules != 1.6 || v.MaxConcurrent != 6 || v.RateLimitRPS != 2.5 {
+		t.Fatalf("значения не применились: %+v", v)
+	}
+	// невалидное: tau_review >= tau_accept
+	bad := url.Values{"profile": {"deep"}, "tau_accept": {"0.5"}, "tau_review": {"0.7"},
+		"w_meta": {"1"}, "w_rules": {"1"}, "w_llm": {"1"}, "similarity": {"0.8"}, "max_size": {"100"},
+		"max_concurrent": {"8"}, "rate_limit_rps": {"4"}, "cost_scan_limit_usd": {"5"}}
+	if code := post(bad); code != http.StatusSeeOther {
+		t.Fatalf("save bad: %d", code)
+	}
+	de, _ = config.OpenDetectorsEditor(detPath)
+	v, _ = de.View()
+	if v.TauAccept == 0.5 {
+		t.Fatalf("невалидные значения записаны: %+v", v)
+	}
+	entries, err := st.AuditList(context.Background(), audit.Filter{Category: audit.CatAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Action == "detectors_update" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("аудит detectors_update отсутствует")
+	}
+}

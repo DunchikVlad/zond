@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const editorFixture = `# connections.yaml — заголовочный комментарий сохраняется
@@ -127,5 +129,90 @@ func TestSourceEntryValidate(t *testing.T) {
 		Schedule: "0 2 * * *", ScanWindow: "22:00-02:00"}
 	if err := good.Validate(); err != nil {
 		t.Errorf("Validate(good): %v", err)
+	}
+}
+
+func TestDetectorsEditorRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "detectors.yaml")
+	if err := os.WriteFile(p, []byte(`# detectors — комментарий сохраняется
+version: "1"
+
+scan:
+  profile: deep
+  sample:
+    mode: percent
+    value: 5
+    max_rows: 20000
+
+ensemble:
+  tau_accept: 0.8
+  tau_review: 0.5
+  weights:
+    meta: 1.0
+    rules: 1.5
+    llm: 1.2
+
+cluster:
+  similarity: 0.8
+  max_size: 100
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e, err := OpenDetectorsEditor(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := e.View()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Profile != "deep" || v.TauAccept != 0.8 || v.WRules != 1.5 || v.MaxSize != 100 {
+		t.Fatalf("view: %+v", v)
+	}
+	// правка + добавление proxy-секции
+	v.TauReview = 0.4
+	v.WLLM = 1.4
+	v.MaxConcurrent = 4
+	v.RateLimitRPS = 2.5
+	v.CostScanLimitUSD = 7
+	v.Offline = true
+	if err := e.Apply(v); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	raw, err := e.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, "комментарий сохраняется") {
+		t.Fatalf("комментарий потерян:\n%s", s)
+	}
+	e2, err := OpenDetectorsEditor(p) // sanity: файл ещё старый, но парсится
+	if err != nil {
+		t.Fatalf("перечитывание файла: %v", err)
+	}
+	_ = e2
+	var d Detectors
+	dec := yaml.NewDecoder(strings.NewReader(s))
+	dec.KnownFields(true)
+	if err := dec.Decode(&d); err != nil {
+		t.Fatalf("итог не парсится: %v", err)
+	}
+	if d.Ensemble.TauReview != 0.4 || d.Ensemble.Weights["llm"] != 1.4 ||
+		d.Proxy.MaxConcurrent != 4 || d.Proxy.RateLimitRPS != 2.5 ||
+		d.Proxy.CostScanLimitUSD != 7 || !d.Proxy.Offline {
+		t.Fatalf("значения не применились: %+v", d)
+	}
+	// отказ: tau_review >= tau_accept
+	bad := v
+	bad.TauReview = 0.9
+	if err := e.Apply(bad); err == nil {
+		t.Fatal("tau_review >= tau_accept: ожидалась ошибка валидации")
+	}
+	bad = v
+	bad.Profile = "ultra"
+	if err := e.Apply(bad); err == nil {
+		t.Fatal("profile ultra: ожидалась ошибка")
 	}
 }

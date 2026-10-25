@@ -65,6 +65,13 @@ type Server struct {
 	conns      func() *config.Connections
 	connsPath  string
 	applyConns func(entry config.SourceEntry) (*config.Connections, error)
+
+	// Инкремент S8-8 (ADR-0014): горячая перезагрузка detectors.yaml через
+	// /settings: bundle — текущий bundle; detectorsPath — редактируемый файл;
+	// applyDetectors — перечитать и применить (пороги/веса/лимиты новых прогонов).
+	bundle         func() *config.Bundle
+	detectorsPath  string
+	applyDetectors func() (*config.Detectors, error)
 }
 
 // Option — настройка Server (S8-7: провайдеры конфигурации для /sources).
@@ -85,6 +92,32 @@ func WithConnsPath(path string) Option {
 // перестраивает расписания scheduler'а.
 func WithApplyConns(fn func(entry config.SourceEntry) (*config.Connections, error)) Option {
 	return func(s *Server) { s.applyConns = fn }
+}
+
+// WithBundle — горячий провайдер bundle (S8-8, ADR-0014: свежие детекторы
+// для /settings после правки файла).
+func WithBundle(fn func() *config.Bundle) Option {
+	return func(s *Server) { s.bundle = fn }
+}
+
+// WithDetectorsPath — путь к редактируемому detectors.yaml.
+func WithDetectorsPath(path string) Option {
+	return func(s *Server) { s.detectorsPath = path }
+}
+
+// WithApplyDetectors — колбэк «применить detectors.yaml без рестарта».
+func WithApplyDetectors(fn func() (*config.Detectors, error)) Option {
+	return func(s *Server) { s.applyDetectors = fn }
+}
+
+// bundleCurrent — текущий bundle: горячий провайдер или стартовый cfg.
+func (s *Server) bundleCurrent() *config.Bundle {
+	if s.bundle != nil {
+		if b := s.bundle(); b != nil {
+			return b
+		}
+	}
+	return s.cfg
 }
 
 // connsCurrent — текущий connections: горячий провайдер или стартовый cfg.
@@ -154,6 +187,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /sources/save", s.requireRole(auth.ActionManage, s.handleSourceSave))
 	mux.HandleFunc("POST /sources/{name}/delete", s.requireRole(auth.ActionManage, s.handleSourceDelete))
 	mux.HandleFunc("POST /sources/test", s.requireRole(auth.ActionManage, s.handleSourceTest))
+	// S8-8: горячая правка detectors.yaml (ADR-0014), только admin.
+	mux.HandleFunc("POST /settings/detectors/save", s.requireRole(auth.ActionManage, s.handleDetectorsSave))
 	return s.withAuth(s.withCSRF(s.withSecurity(mux)))
 }
 
@@ -700,12 +735,34 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	for _, src := range s.connsCurrent().Sources {
 		srcs = append(srcs, srcView{Name: src.Name, Type: src.Type})
 	}
+	b := s.bundleCurrent()
+	// S8-8: редактируемые скаляры detectors — из raw-файла (без сюрпризов
+	// интерполяции); при недоступности редактора — из загруженного bundle.
+	detView := config.DetectorsView{
+		Profile: b.Detectors.Scan.Profile, TauAccept: b.Detectors.Ensemble.TauAccept,
+		TauReview: b.Detectors.Ensemble.TauReview,
+		WMeta:     b.Detectors.Ensemble.Weights["meta"], WRules: b.Detectors.Ensemble.Weights["rules"],
+		WLLM:       b.Detectors.Ensemble.Weights["llm"],
+		Similarity: b.Detectors.Cluster.Similarity, MaxSize: b.Detectors.Cluster.MaxSize,
+		MaxConcurrent: b.Detectors.Proxy.MaxConcurrent, RateLimitRPS: b.Detectors.Proxy.RateLimitRPS,
+		CostScanLimitUSD: b.Detectors.Proxy.CostScanLimitUSD, Offline: b.Detectors.Proxy.Offline,
+	}
+	if s.detectorsPath != "" {
+		if de, err := config.OpenDetectorsEditor(s.detectorsPath); err == nil {
+			if v, err := de.View(); err == nil {
+				detView = v
+			}
+		}
+	}
 	s.render(w, http.StatusOK, "settings.html", map[string]any{
 		"Subject":  s.subject(r),
 		"Title":    "Настройки",
 		"Sources":  srcs,
-		"Agents":   s.cfg.Detectors.Agents,
+		"Agents":   b.Detectors.Agents,
 		"Taxonomy": s.cfg.Taxonomy,
-		"Ensemble": s.cfg.Detectors.Ensemble,
+		"Ensemble": b.Detectors.Ensemble,
+		"Det":      detView,
+		"CSRF":     s.csrfToken(r),
+		"Msg":      r.URL.Query().Get("msg"),
 	})
 }

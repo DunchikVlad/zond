@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -217,4 +218,65 @@ func writeBackupAndFile(path string, raw []byte) error {
 		return fmt.Errorf("замена %s: %w", path, err)
 	}
 	return nil
+}
+
+// handleDetectorsSave — S8-8 (ADR-0014): сохранение порогов/весов/лимитов
+// detectors.yaml через UI с горячим применением (только admin).
+func (s *Server) handleDetectorsSave(w http.ResponseWriter, r *http.Request) {
+	if s.detectorsPath == "" {
+		s.renderError(w, http.StatusInternalServerError, "путь к detectors.yaml не настроен (WithDetectorsPath)")
+		return
+	}
+	de, err := config.OpenDetectorsEditor(s.detectorsPath)
+	if err != nil {
+		s.renderError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	v := config.DetectorsView{
+		Profile:          r.FormValue("profile"),
+		TauAccept:        parseFormFloat(r, "tau_accept"),
+		TauReview:        parseFormFloat(r, "tau_review"),
+		WMeta:            parseFormFloat(r, "w_meta"),
+		WRules:           parseFormFloat(r, "w_rules"),
+		WLLM:             parseFormFloat(r, "w_llm"),
+		Similarity:       parseFormFloat(r, "similarity"),
+		MaxSize:          parseFormInt(r, "max_size"),
+		MaxConcurrent:    parseFormInt(r, "max_concurrent"),
+		RateLimitRPS:     parseFormFloat(r, "rate_limit_rps"),
+		CostScanLimitUSD: parseFormFloat(r, "cost_scan_limit_usd"),
+		Offline:          r.FormValue("offline") == "on",
+	}
+	if err := de.Apply(v); err != nil {
+		http.Redirect(w, r, "/settings?msg="+url.QueryEscape("Ошибка: "+err.Error()), http.StatusSeeOther)
+		return
+	}
+	raw, err := de.Bytes()
+	if err != nil {
+		s.renderError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := writeBackupAndFile(s.detectorsPath, raw); err != nil {
+		s.renderError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	msg := "Детекторы сохранены — применены к новым прогонам без рестарта"
+	if s.applyDetectors != nil {
+		if _, err := s.applyDetectors(); err != nil {
+			msg = "Файл записан, применение не удалось (вступит после рестарта): " + err.Error()
+		}
+	}
+	s.sourceAudit(r, "detectors_update", "detectors", map[string]any{
+		"profile": v.Profile, "tau_accept": v.TauAccept, "tau_review": v.TauReview,
+	})
+	http.Redirect(w, r, "/settings?msg="+url.QueryEscape(msg), http.StatusSeeOther)
+}
+
+func parseFormFloat(r *http.Request, key string) float64 {
+	f, _ := strconv.ParseFloat(r.FormValue(key), 64)
+	return f
+}
+
+func parseFormInt(r *http.Request, key string) int {
+	n, _ := strconv.Atoi(r.FormValue(key))
+	return n
 }

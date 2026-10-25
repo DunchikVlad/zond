@@ -493,6 +493,7 @@ type engineRunner struct {
 	resolver secrets.Resolver // ref-источников (Vault, ADR-0012); nil — режим ENV
 	breaker  *scanengine.Breaker
 	connsFn  func() *config.Connections // S8-7: горячий провайдер (UI-правка); nil — статика
+	bundleFn func() *config.Bundle      // S8-8: горячие детекторы (ADR-0014); nil — статика
 
 	mu       sync.Mutex
 	running  map[string]context.CancelFunc // scan_id → cancel
@@ -507,6 +508,17 @@ func (r *engineRunner) conns() *config.Connections {
 		}
 	}
 	return r.b.Connections
+}
+
+// bundle — текущий bundle (S8-8: детекторы перечитываются без рестарта;
+// taxonomy статична до отдельного решения).
+func (r *engineRunner) bundle() *config.Bundle {
+	if r.bundleFn != nil {
+		if b := r.bundleFn(); b != nil {
+			return b
+		}
+	}
+	return r.b
 }
 
 func newEngineRunner(b *config.Bundle, st *store.Store, log *slog.Logger, useLLM bool, resolver secrets.Resolver) *engineRunner {
@@ -532,7 +544,7 @@ func (r *engineRunner) Start(source, profile, actor string) (string, error) {
 		return "", &api.SourceUnavailableError{Reason: perr.Error()}
 	}
 	if profile == "" {
-		profile = r.b.Detectors.Scan.Profile
+		profile = r.bundle().Detectors.Scan.Profile
 	}
 	factory, ok := connector.Lookup(src.Type)
 	if !ok {
@@ -561,7 +573,7 @@ func (r *engineRunner) Start(source, profile, actor string) (string, error) {
 	var llm scanengine.LLMClassifier
 	var llmID scanengine.LLMIdentity
 	if r.useLLM {
-		llm, llmID, err = buildLLMComposite(r.b, taxonomyLabels(r.b.Taxonomy))
+		llm, llmID, err = buildLLMComposite(r.bundle(), taxonomyLabels(r.b.Taxonomy))
 		if err != nil {
 			conn.Close()
 			return "", &api.SourceUnavailableError{Reason: fmt.Sprintf("llm-слой: %v", err)}
@@ -599,7 +611,7 @@ func (r *engineRunner) Start(source, profile, actor string) (string, error) {
 			r.mu.Unlock()
 			conn.Close()
 		}()
-		cfg := engineConfig(r.b)
+		cfg := engineConfig(r.bundle())
 		cfg.Actor = actor // п. 14.2: прогон аудируется от имени инициатора
 		cfg.Breaker = r.breaker
 		// Лимиты источника (п. 13.2, S8-2): таблицы параллельно до
@@ -671,23 +683,40 @@ func runServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "serve: конфигурация: %v\n", err)
 		return 2
 	}
-	// S8-7: горячий провайдер connections — после правки источников через UI
-	// (/sources) файл перечитывается, держатель меняется, расписания
-	// шедулера перестраиваются; действующие прогоны не трогаем.
-	var connsHot atomic.Pointer[config.Connections]
-	connsHot.Store(b.Connections)
+	// S8-7/S8-8: горячий провайдер конфигурации — после правки источников
+	// (/sources) или детекторов (/settings) файлы перечитываются, держатель
+	// меняется, расписания шедулера перестраиваются; действующие прогоны не
+	// трогаем. Действующие прогоны завершаются со старыми порогами —
+	// приемлемо (документировано в ADR-impl-stage-8-8).
+	var bundleHot atomic.Pointer[config.Bundle]
+	bundleHot.Store(b)
 	connsPath := filepath.Join(*dir, "connections.yaml")
+	detectorsPath := filepath.Join(*dir, "detectors.yaml")
 	var sched *scheduler.Scheduler
 	applyConns := func(config.SourceEntry) (*config.Connections, error) {
 		c, err := config.LoadConnections(connsPath)
 		if err != nil {
 			return nil, err // файл записан, но не применён (например, новый ENV) — вступит после рестарта
 		}
-		connsHot.Store(c)
+		nb := *bundleHot.Load()
+		nb.Connections = c
+		bundleHot.Store(&nb)
 		if sched != nil {
 			sched.ReplaceSources(c.Sources)
 		}
 		return c, nil
+	}
+	// applyDetectors — горячая перезагрузка detectors.yaml (ADR-0014):
+	// пороги/веса/лимиты новых прогонов; реестр агентов в UI не правится.
+	applyDetectors := func() (*config.Detectors, error) {
+		d, err := config.LoadDetectors(detectorsPath)
+		if err != nil {
+			return nil, err
+		}
+		nb := *bundleHot.Load()
+		nb.Detectors = d
+		bundleHot.Store(&nb)
+		return d, nil
 	}
 	log := redactedLogger(b)
 	st, err := store.Open(*dbPath)
@@ -710,7 +739,8 @@ func runServe(args []string) int {
 			"refs", len(b.Connections.Vault.Secrets))
 	}
 	runner := newEngineRunner(b, st, log, *useLLM, resolver)
-	runner.connsFn = connsHot.Load // S8-7: горячий список источников
+	runner.connsFn = func() *config.Connections { return bundleHot.Load().Connections } // S8-7/S8-8: горячий список источников
+	runner.bundleFn = bundleHot.Load                                                    // S8-8: горячие детекторы
 	// Аутентификация (инкремент 5в, п. 11.3/п. 14.2): включается sso.enabled
 	// в connections.yaml; admin-token fallback — env CLASSIFIER_ADMIN_TOKEN
 	// при admin_token_fallback=true (bootstrap/аварийный доступ).
@@ -782,9 +812,12 @@ func runServe(args []string) int {
 	// API-сервера, всё остальное (страницы) — у web-сервера (ADR-0007,
 	// server-rendered + HTMX из embed.FS).
 	webSrv, err := web.New(st, log, sessions, b.Connections.SSO.Enabled, runner, b,
-		web.WithConns(connsHot.Load),
+		web.WithConns(func() *config.Connections { return bundleHot.Load().Connections }),
 		web.WithConnsPath(connsPath),
 		web.WithApplyConns(applyConns),
+		web.WithBundle(bundleHot.Load),
+		web.WithDetectorsPath(detectorsPath),
+		web.WithApplyDetectors(applyDetectors),
 	)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "serve: web:", err)

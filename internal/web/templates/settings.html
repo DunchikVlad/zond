@@ -1,10 +1,34 @@
 {{template "header" .}}
+{{if .Msg}}<p class="msg">{{.Msg}}</p>{{end}}
 <h2>Источники</h2>
 <table>
   <tr><th>Имя</th><th>Тип</th></tr>
   {{range .Sources}}<tr><td>{{.Name}}</td><td>{{.Type}}</td></tr>{{end}}
 </table>
-<p class="note">DSN/URI не отображаются (секреты интерполированы в памяти, п. 14.1). Расписание пересканов — поле schedule у источника (п. 15).</p>
+<p class="note">DSN/URI не отображаются (секреты интерполированы в памяти, п. 14.1). Подключение баз и расписания пересканов — на странице <a href="/sources">Источники</a>.</p>
+
+<h2>Детекторы (пороги, веса, лимиты) — hot-reload ADR-0014</h2>
+<p class="note">Применяется к новым прогонам без рестарта; действующие прогоны завершаются со старыми порогами. Реестр агентов ниже — только просмотр (правка — рестарт).</p>
+<form method="post" action="/settings/detectors/save" class="startform">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <label>Профиль <select name="profile">
+    <option value="quick" {{if eq .Det.Profile "quick"}}selected{{end}}>quick</option>
+    <option value="deep" {{if eq .Det.Profile "deep"}}selected{{end}}>deep</option>
+    <option value="custom" {{if eq .Det.Profile "custom"}}selected{{end}}>custom</option>
+  </select></label>
+  <label>tau_accept <input name="tau_accept" value="{{conf .Det.TauAccept}}" size="5"></label>
+  <label>tau_review <input name="tau_review" value="{{conf .Det.TauReview}}" size="5"></label>
+  <label>вес meta <input name="w_meta" value="{{conf .Det.WMeta}}" size="4"></label>
+  <label>вес rules <input name="w_rules" value="{{conf .Det.WRules}}" size="4"></label>
+  <label>вес llm <input name="w_llm" value="{{conf .Det.WLLM}}" size="4"></label>
+  <label>cluster similarity <input name="similarity" value="{{conf .Det.Similarity}}" size="4"></label>
+  <label>cluster max_size <input name="max_size" value="{{.Det.MaxSize}}" size="4"></label>
+  <label>proxy max_concurrent <input name="max_concurrent" value="{{.Det.MaxConcurrent}}" size="4"></label>
+  <label>rate_limit_rps <input name="rate_limit_rps" value="{{conf .Det.RateLimitRPS}}" size="4"></label>
+  <label>cost_scan_limit_usd <input name="cost_scan_limit_usd" value="{{conf .Det.CostScanLimitUSD}}" size="5"></label>
+  <label>offline <input type="checkbox" name="offline" {{if .Det.Offline}}checked{{end}}></label>
+  <button type="submit">Сохранить и применить</button>
+</form>
 
 <h2>Агенты LLM</h2>
 <table>
@@ -14,13 +38,10 @@
   {{end}}
 </table>
 
-<h2>Пороги ансамбля</h2>
-<p>tau_accept={{.Ensemble.TauAccept}} · tau_review={{.Ensemble.TauReview}} · веса: {{range $k, $v := .Ensemble.Weights}}{{$k}}={{$v}} {{end}}</p>
-
 <h2>Таксономия (v{{.Taxonomy.Version}})</h2>
 <table>
   <tr><th>Лейбл</th><th>Чувствительность</th></tr>
   {{range .Taxonomy.Labels}}<tr><td><span class="badge l-{{.Name}}">{{.Name}}</span></td><td>{{.Sensitivity}}</td></tr>{{end}}
 </table>
-<p class="note">Редактирование — hot-reload detectors.yaml (ADR-0014), реализация позже; connections.yaml и sso: требуют рестарта.</p>
+<p class="note">taxonomy.yaml и реестр агентов — рестарт; connections и детекторы — горячая перезагрузка через UI (S8-7/S8-8).</p>
 {{template "footer" .}}
