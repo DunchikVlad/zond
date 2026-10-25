@@ -79,6 +79,23 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
+Снимок от 2026-10-25 ~19:38 UTC (сессия планирования S9; базовый HEAD
+`de8246c` = origin/main, код не менялся):
+
+- **План S9 задокументирован**: `docs/progress/2026-10-25-stage-9-plan.md`.
+  Приоритет: S9-1 исправления `/sources`, qualified `schema.table`, совместимость
+  resume/provenance → S9-2 полный per-column LLM evidence и кэш → S9-3
+  пользовательский prompt на скан с prompt hash/snapshot → S9-4 отдельный
+  DescriptionRunner по `scan_id` → S9-5 динамический выбор СУБД и PostgreSQL →
+  S9-6 профили/UI/API/async-export/rate-limit → S9-7 живой eval и CI/доки.
+- Перед S9-3/S9-4 обновить blueprint/ADR: prompt-контракт и допустимый контекст
+  описания БД (текущая изоляция запрещает имена БД/таблиц/хостов в LLM).
+- Проверка дерева: `make ci` зелёный; coverage rules 93,6%, agentproxy 83,8%,
+  ensemble 95,7%. Изменений в коде в этой сессии нет.
+- Открытое: Kimi живой прогон — ждёт пополнения баланса; fake-LLM eval
+  $0,117/1000 колонок выше цели $0,10. CI Fuzz и coverage gate не добавлены;
+  LICENSE/NOTICE отсутствуют; известный flaky race `internal/audit` остаётся.
+
 Снимок от 2026-10-25 ~16:20 UTC (сессия S8-8 — hot-reload detectors.yaml,
 частичная реализация ADR-0014; HEAD `00c410c` = origin/main):
 
