@@ -186,6 +186,15 @@ LLM-вызов (1 колонка = 1 сессия) → валидация JSON �
 в serve-runner), таймаут запроса 5 мин, circuit breaker (5× `source_overload`
 → пауза 5 мин); окна `scan_window` — откладывание шедулером.
 
+S9-1: постоянная идентичность таблицы — `TableRef.QualifiedName()` в форме
+`schema.table` (MongoDB: `database.collection`), с экранированием `\` и `.`
+внутри компонентов. Она используется в чекпоинтах, verdict ID, store, drift,
+API/UI; драйверы по-прежнему получают отдельные `Schema`/`Name`. В `scans`
+сохраняются `config_fingerprint`, версии taxonomy/detectors/binary и версия
+идентичности таблиц. Resume (CLI/REST/UI) fail-closed сверяет provenance;
+старые строки без него не продолжаются. Runner фиксирует один config snapshot
+до подключения и использует его на всём прогоне.
+
 ### 4.3. Ревью, дрейф, экспорт
 
 - **Ревью**: карточка `pending` → действие confirm/reject/relabel → запись
@@ -257,13 +266,18 @@ mutex. Внешний sink: syslog/CEF с локальной очередью п
 
 ### 5.6. Конфигурация и секреты
 
-Три файла (ADR-0009): `connections.yaml` (источники + sso + vault, секретов нет),
-`detectors.yaml` (правила/агенты/пороги/маск-профиль — **hot-reload**, watch +
-«Применить», бамп `detectors_version`, аудит с diff), `taxonomy.yaml` (semver,
-генерация Go-констант на `go generate`). Секреты: `${ENV}`-интерполяция или
-`secrets.Resolver` (Vault kv-v2 / dynamic leases, лизы продлевает фоновая
-горутина, в памяти только; blueprint п. 12.1). Fail-fast на старте с перечнем
-проблем.
+Три файла (ADR-0009): `connections.yaml` (источники + sso + vault + audit sink,
+секретов нет), `detectors.yaml` (правила/агенты/пороги/лимиты — hot-reload через
+«Настройки» с S8-8; версия содержимого автоматически не увеличивается),
+`taxonomy.yaml` (semver). Секреты: целая `${ENV}`-ссылка или `secrets.Resolver`
+(Vault kv-v2 / dynamic leases, лизы продлевает фоновая горутина, в памяти только;
+blueprint п. 12.1). Fail-fast на старте с перечнем проблем.
+
+Правка `/sources` (S9-1) сериализуется mutex'ом: strict decode + полная
+`Connections.Validate` → уникальный temp + `.bak` → atomic hot apply → обязательный
+hash-chain аудит. Ошибка применения или аудита откатывает файл; после ошибки аудита
+старый конфиг повторно применяется к runtime. Vault `ref` и per-source лимиты
+редактируются в той же форме; смешанные plaintext/`${ENV}` пароли отклоняются.
 
 ### 5.7. Аутентификация и авторизация
 

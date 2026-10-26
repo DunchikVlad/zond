@@ -269,9 +269,9 @@ agents:
 
 | Поле | Тип | Описание |
 |---|---|---|
-| `id` | string | `sha1(scan_id \| table \| path)` — идемпотентная вставка |
+| `id` | string | SHA-1 length-prefixed `(scan_id, table, path)` — идемпотентная вставка без неоднозначной склейки |
 | `scan_id` | string | ссылка на прогон |
-| `table` | string | таблица / коллекция |
+| `table` | string | каноническое `schema.table` (для MongoDB — `database.collection`); `\` и `.` внутри компонентов экранируются |
 | `path` | string | колонка / путь поля после флаттенинга |
 | `native_type` | string | нативный тип |
 | `label` | string | лейбл из таксономии |
@@ -348,11 +348,11 @@ rename/remove с обязательной таблицей alias-маппинг�
 | LLM: ответ не-JSON / не проходит схему | 1 повтор с repair-инструкцией («return only the JSON object»); далее как выше |
 | LLM: лейбл вне таксономии | Приводится к `UNKNOWN` + `pending`, событие в `observe` (сигнал дрейфа промпта) |
 | LLM: сэмпл слишком мал (<`min_values_for_llm`, default 10 непустых уникальных) или доля null >0.95 | Вызов не делается; вердикт `UNKNOWN`, `review_status=pending`, причина `small_sample` в `evidence` |
-| Resume: не совпал `config_fingerprint`, `taxonomy_version` или версия бинарника | Отказ (код 2) с перечнем расхождений в stderr; корректный путь — новый скан, старый остаётся в истории |
+| Resume: не совпал `config_fingerprint`, `taxonomy_version`, `detectors_version` или версия бинарника | Отказ (CLI код 2, API 409) с перечнем всех расхождений; корректный путь — новый скан, старый остаётся в истории |
 | Vault недоступен при старте источника (если используется) | Источник `failed` с причиной `vault_unavailable`; остальные источники сканируются; фоновый retry с backoff (п. 12.1) |
 | Экспорт больше `export_max_rows` (default 50 000, п. 11.2) | Отказ с кодом `invalid_request` + предложение async-экспорта (фоновая задача, событие в аудите) |
 | Невалидный конфиг / секрет не задан | Fail fast на старте команды, код ошибки 2, список проблем в stderr |
-| Cancel (Ctrl+C / shutdown) | Плавная остановка, чекпоинт, скан `interrupted`, резюм по `scan --resume <id>` |
+| Cancel (Ctrl+C / shutdown) | Плавная остановка, чекпоинт, скан `interrupted`, CLI `scan -resume` либо REST/UI resume по `{id}` |
 
 Идемпотентность: повторный запуск скана с тем же конфигом перезаписывает вердикты
 того же `scan_id`-семейства (новый `scan_id`, старые вердикты остаются в истории).
@@ -513,8 +513,9 @@ confidence); tie-break при равных score — лексикографич�
 
 ```sql
 sources(id, type, name, conn_ref, created_at)
-scans(id, source_id, profile, config_fingerprint, started_at, finished_at,
-      status, stats_json)                       -- status: running|partial|done|interrupted|failed|budget_exceeded
+scans(id, source_name, profile, config_fingerprint, taxonomy_version,
+      detectors_version, binary_version, table_identity_version,
+      started_at, finished_at, status, stats_json) -- status: running|partial|done|interrupted|failed|budget_exceeded
 scan_tables(scan_id, table_name, row_count, status, error)
 columns(scan_id, table_name, path, native_type, stats_json, cluster_id)
 verdicts(...)                                   -- п. 5.4
@@ -548,6 +549,7 @@ cost_usd, duration_s, llm_share` — источник метрик п. 17.
 | GET | `/api/v1/scans` | список прогонов (пагинация, фильтр по статусу/источнику) |
 | GET | `/api/v1/scans/{id}` | статус, прогресс, stats_json |
 | POST | `/api/v1/scans/{id}/stop` | мягкая остановка |
+| POST | `/api/v1/scans/{id}/resume` | новый прогон по done-чекпоинтам partial/interrupted после сверки provenance → 202 `{scan_id, resume_from}`; несовместимость → 409 `resume_incompatible` со списком `mismatches` |
 | GET | `/api/v1/verdicts` | фильтры: `scan_id, label, sensitivity, min_conf, review_status, table, cluster_id`; сортировка `risk_first` (PCI/PII × confidence desc) |
 | GET | `/api/v1/verdicts/{id}` | детали; evidence уже маскирован (ADR-0010) |
 | POST | `/api/v1/verdicts/{id}/review` | `{action: confirm|reject|relabel, label?}` → запись в `review_events`, смена `review_status` |
@@ -561,7 +563,7 @@ cost_usd, duration_s, llm_share` — источник метрик п. 17.
 id (`X-Request-ID`) и событие в аудит-логе.
 
 Ошибки API — единый конверт `{error: {code, message, details}}`, коды:
-`invalid_request, source_unavailable, scan_not_found, review_conflict, internal`.
+`invalid_request, source_unavailable, scan_not_found, review_conflict, resume_incompatible, internal`.
 
 Лимиты: экспорт сверх `export_max_rows` (default 50 000) — отказ с
 предложением async-экспорта (фоновая задача, результат по ссылке, событие
@@ -706,10 +708,14 @@ vault:
 
 - Скан — конечный автомат: `running → (done | partial | interrupted | failed |
   budget_exceeded)`; переходы фиксируются в `scans.status` транзакционно.
-- Чекпоинт после каждой таблицы: `scan_tables.status` + commit вердиктов таблицы.
-  Резюм: `zond scan --resume <scan_id>` пропускает `done`-таблицы.
-  Допускается, только если совпали `config_fingerprint`, `taxonomy_version`
-  и версия бинарника; иначе отказ (код 2) с перечнем расхождений.
+- Чекпоинт после каждой таблицы: `scan_tables.status` + commit вердиктов таблицы;
+  ключ и `verdicts.table_name` — каноническое `schema.table` (S9-1).
+  CLI `zond scan -resume` продолжает последний partial/interrupted прогон источника;
+  REST/UI продолжают явно выбранный `{id}`. Пропускаются только `done`-таблицы.
+  Допускается, только если совпали `config_fingerprint`, `taxonomy_version`,
+  `detectors_version` и версия бинарника; иначе отказ (CLI код 2, API 409)
+  с перечнем всех расхождений. Пустой provenance старых строк — несовместимость,
+  а не разрешение. После S9-3 сюда добавляются версия базового и хэш пользовательского промпта.
 - Вызовы LLM атомарны относительно вердикта: либо `agent_calls`+`verdicts`,
   либо откат (отсутствие «висящих» вердиктов без учётной записи).
 - Потребление памяти потоковое: сэмпл стримится (iter.Seq2), пул значений

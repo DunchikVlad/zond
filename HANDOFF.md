@@ -79,6 +79,33 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
+Снимок от 2026-10-26 ~18:10 UTC (сессия S9-1; код `691d0f4`,
+документация этим «-док» коммитом):
+
+- **S9-1 завершён**: `/sources` экранирует HTMX, полностью валидирует YAML,
+  сериализует save/delete mutex'ом, использует уникальные temp, откатывает
+  файл/runtime при ошибке apply/audit; Vault ref и per-source лимиты доступны
+  в UI, ENV-пароль проверяется как целая ссылка. Подробности:
+  `docs/progress/2026-10-26-stage-9-1-correctness.md`.
+- Таблицы получили каноническое `schema.table` (Mongo `database.collection`,
+  экранирование `\`/`.`). Оно проходит через checkpoint, verdict ID/store,
+  drift/API/UI; одноимённые таблицы разных схем больше не перезаписываются.
+- Миграция `0010_scan_provenance.sql`: table identity version + config
+  fingerprint/taxonomy/detectors/binary versions. Старые строки не угадываются
+  и без provenance не возобновляются. CLI `-resume` сверяет конфиг; добавлены
+  REST `POST /api/v1/scans/{id}/resume` и UI-кнопки, 409 содержит все mismatches.
+- Проверки: исходный и финальный `make ci`, `make config-check`, полный
+  `make test-race` — зелёные (в т.ч. audit). Миграции up/down/up и v9→v10
+  с существующими scan/checkpoint/verdict покрыты. Живой стенд не запускался.
+- **Следующий шаг S9-2**: полный per-column LLM evidence (ответ classify/verify
+  отдельно от ensemble, usage/cost/latency/status), эквивалентный cache hit/miss
+  (reason/sensitivity/PromptVersion), фильтры API/UI; экономичный каскад сохранить.
+- Перед S9-3/S9-4 по-прежнему обновить prompt-контракт и ADR изоляции описания.
+- Открытое: Kimi живой прогон ждёт пополнения баланса; fake-LLM eval
+  $0,117/1000 выше цели $0,10. CI Fuzz/coverage gate не добавлены (PAT без
+  `workflow`), LICENSE/NOTICE отсутствуют; известный flaky race audit остаётся
+  в списке наблюдений, хотя в этой сессии полный race прошёл.
+
 Снимок от 2026-10-25 ~19:38 UTC (сессия планирования S9; базовый HEAD
 `de8246c` = origin/main, код не менялся):
 
