@@ -79,6 +79,39 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
+Снимок от 2026-10-26 ~20:55 UTC (сессия S9-3; код `bd49d0a`,
+документация этим «-док» коммитом):
+
+- **S9-3 завершён**: пользовательский промпт на скан. Prompt-контракт
+  blueprint (п. 5.3 пользовательская инструкция, п. 10.5 хэш в ключе кэша,
+  п. 11.1 колонки scans, п. 13 resume) и ADR-security-llm-isolation
+  (дополнение S9-3) обновлены до кода. `prompts.Version="2"`;
+  `NormalizeUser` (≤2000 рун, NUL запрет, trim), `UserHash`,
+  `SystemWithInstruction`/`VerifierSystemWithInstruction` (блок
+  `<operator_instruction>` после защищённых правил). Единый
+  `scanengine.ScanOptions` во всех трёх интерфейсах (api/web/scheduler);
+  agentproxy `WithInstruction` (system классификатора и верификатора).
+  Per-scan LLM (`llm *bool` в API, select в UI, default — поведение сервера).
+  Миграция 0012: `scans.prompt_base_version/prompt_hash/prompt_text/llm_enabled`;
+  resume сверяет оба поля fail-closed и воспроизводит промпт+флаг исходного
+  прогона (CLI `-prompt` с `-resume` отклоняется). Ключ кэша включает хэш
+  инструкции — разные промпты не делят кэш. Scheduled-прогоны — всегда
+  стандартный промпт. Аудит scan_start: prompt_hash/prompt_len/llm без текста.
+  REST: лимит тела 1 МБ, DisallowUnknownFields. Подробности:
+  `docs/progress/2026-10-26-stage-9-3-user-prompt.md`.
+- Проверки: исходный и финальный `make ci`, полный `make test-race` (все
+  пакеты) — зелёные. Миграции up/down/up и v11→v12 покрыты. Живой стенд не
+  запускался.
+- **Следующий шаг S9-4**: DescriptionRunner — отдельный агентский прогон
+  описания БД по scan_id (без повторного подключения к источнику), versioned
+  prompt + строгая схема, статусы running/done/failed/interrupted, история
+  описаний, экономика и аудит, endpoint'ы по плану. Контур данных описания
+  (имена таблиц/колонок в LLM) уже зафиксирован для пересмотра в ADR изоляции.
+- Открытое: Kimi живой прогон ждёт пополнения баланса; fake-LLM eval
+  $0,117/1000 выше цели $0,10. CI Fuzz/coverage gate не добавлены (PAT без
+  `workflow`), LICENSE/NOTICE отсутствуют; flaky race audit в обеих сессиях
+  не проявился (полный race зелёный).
+
 Снимок от 2026-10-26 ~19:10 UTC (сессия S9-2; код `aca8cc1`,
 документация этим «-док» коммитом):
 
