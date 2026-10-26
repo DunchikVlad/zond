@@ -3,6 +3,7 @@
   Источник: <strong>{{.Scan.SourceName}}</strong> · Профиль: {{.Scan.Profile}} ·
   Статус: <span class="badge s-{{.Scan.Status}}">{{.Scan.Status}}</span> ·
   Старт: {{fmtTime .Scan.StartedAt}} · Финиш: {{fmtTimeP .Scan.FinishedAt}}
+  {{if .Scan.PromptHash}} · Промпт: v{{.Scan.PromptBaseVersion}} · {{.Scan.PromptHash}}{{end}}
   {{if eq .Scan.Status "running"}} · <button hx-post="/scans/{{.Scan.ID}}/stop" class="danger">Остановить</button>{{end}}
   {{if or (eq .Scan.Status "partial") (eq .Scan.Status "interrupted")}}
   <form method="post" action="/scans/{{.Scan.ID}}/resume" style="display:inline">

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/DunchikVlad/zond/internal/agentproxy"
+	"github.com/DunchikVlad/zond/internal/agentproxy/prompts"
 	"github.com/DunchikVlad/zond/internal/connector"
 	"github.com/DunchikVlad/zond/internal/verdict"
 )
@@ -49,7 +50,7 @@ func budgetSource() *fakeConnector {
 func llmWithVerify() *fakeLLMClassifier {
 	return &fakeLLMClassifier{
 		classifyResult: &agentproxy.ClassifyResult{
-			Label: "PHONE", Confidence: 0.95, PromptVersion: "1",
+			Label: "PHONE", Confidence: 0.95, PromptVersion: prompts.Version,
 			Usage: agentproxy.Usage{TokensIn: 1000, TokensOut: 100},
 		},
 		verifyResult: &agentproxy.VerifyResult{
@@ -117,7 +118,7 @@ func TestAgentCallsRecorded(t *testing.T) {
 		if c.ScanID != rep.ScanID || c.AgentID != testLLMID || c.Model != testLLMModel {
 			t.Fatalf("идентичность вызова искажена: %+v", c)
 		}
-		if c.PromptVersion != "1" || c.CreatedAt.IsZero() || c.ID == "" {
+		if c.PromptVersion != prompts.Version || c.CreatedAt.IsZero() || c.ID == "" {
 			t.Fatalf("provenance вызова не заполнен: %+v", c)
 		}
 		switch c.Status {
@@ -152,7 +153,7 @@ func TestBudgetExceededStopsLLM(t *testing.T) {
 	llm := &fakeLLMClassifier{
 		// 1M входящих токенов × 0.15/1M = 0.15 >= 0.10 → budget-стоп
 		classifyResult: &agentproxy.ClassifyResult{
-			Label: "PHONE", Confidence: 0.65, PromptVersion: "1",
+			Label: "PHONE", Confidence: 0.65, PromptVersion: prompts.Version,
 			Usage: agentproxy.Usage{TokensIn: 1_000_000},
 		},
 		verifyResult: &agentproxy.VerifyResult{Verdict: "confirm", Label: "PHONE", Confidence: 0.9},

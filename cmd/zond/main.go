@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/DunchikVlad/zond/internal/agentproxy"
+	"github.com/DunchikVlad/zond/internal/agentproxy/prompts"
 	"github.com/DunchikVlad/zond/internal/analyze/meta"
 	"github.com/DunchikVlad/zond/internal/api"
 	"github.com/DunchikVlad/zond/internal/audit"
@@ -215,11 +216,17 @@ func runScan(args []string) int {
 	profile := fs.String("profile", "", "профиль quick|deep|custom (по умолчанию — из detectors.yaml)")
 	useLLM := fs.Bool("llm", false, "подключить LLM-слой из реестра agents detectors.yaml")
 	resume := fs.Bool("resume", false, "догнать последний partial/interrupted прогон источника (пропустить done-таблицы, п. 13.2)")
+	prompt := fs.String("prompt", "", "дополнительная инструкция для LLM (контекст предметной области, ≤2000 символов; S9-3)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *source == "" {
 		fmt.Fprintln(os.Stderr, "scan: флаг -source обязателен")
+		return 2
+	}
+	userPrompt, err := prompts.NormalizeUser(*prompt) // S9-3
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scan: -prompt: %v\n", err)
 		return 2
 	}
 	b, err := config.LoadAll(*dir)
@@ -273,7 +280,32 @@ func runScan(args []string) int {
 	}
 	cfg := engineConfig(b)
 	cfg.BinaryVersion = Version
-	cfg.ConfigFingerprint, err = config.ScanFingerprint(b, src, prof, *useLLM)
+	// S9-3: per-scan промпт и LLM. Resume воспроизводит оба из исходного
+	// прогона (prev.PromptText / prev.LLMEnabled) — повторный прогон детерминирован.
+	llmEff := *useLLM
+	var prev *store.Scan
+	if *resume {
+		if userPrompt != "" {
+			fmt.Fprintln(os.Stderr, "scan: -prompt с -resume не применяется: промпт фиксируется исходным прогоном")
+			return 2
+		}
+		prev, err = st.LastCheckpointScan(context.Background(), src.Name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "scan: -resume: %v\n", err)
+			return 2
+		}
+		if prev == nil {
+			fmt.Fprintf(os.Stderr, "scan: -resume: нет partial/interrupted прогона для источника %q\n", src.Name)
+			return 2
+		}
+		userPrompt = prev.PromptText
+		llmEff = prev.LLMEnabled
+		cfg.ResumeFrom = prev.ID
+	}
+	cfg.UserPrompt = userPrompt
+	cfg.UserPromptHash = prompts.UserHash(userPrompt)
+	cfg.PromptBaseVersion = prompts.Version
+	cfg.ConfigFingerprint, err = config.ScanFingerprint(b, src, prof, llmEff, cfg.UserPromptHash)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scan: fingerprint конфигурации: %v\n", err)
 		return 2
@@ -286,25 +318,15 @@ func runScan(args []string) int {
 	// max_concurrent_scans в CLI не применим — один прогон на процесс.
 	cfg.MaxTables = src.TablesLimit()
 	cfg.QueryTimeout = src.QueryTimeout()
-	if *resume {
-		prev, err := st.LastCheckpointScan(context.Background(), src.Name)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "scan: -resume: %v\n", err)
-			return 2
-		}
-		if prev == nil {
-			fmt.Fprintf(os.Stderr, "scan: -resume: нет partial/interrupted прогона для источника %q\n", src.Name)
-			return 2
-		}
+	if prev != nil {
 		if err := scanengine.ValidateResume(prev, cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "scan: -resume: %v\n", err)
 			return 2
 		}
-		cfg.ResumeFrom = prev.ID
 	}
 	eng := scanengine.New(st, meta.New(b.Taxonomy.Synonyms), cfg)
-	if *useLLM {
-		comp, id, err := buildLLMComposite(b, taxonomyLabels(b.Taxonomy))
+	if llmEff {
+		comp, id, err := buildLLMComposite(b, taxonomyLabels(b.Taxonomy), userPrompt)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "scan -llm:", err)
 			return 2
@@ -418,7 +440,9 @@ func (c *llmComposite) Verify(ctx context.Context, candidate, nativeType string,
 // buildLLMComposite собирает LLM-слой для `zond scan -llm`: shared Gate
 // лимитов (п. 10.4), прокси с egress-политикой (п. 10.7), композит эскалации.
 // Любая неудача — fail-fast (код 2): скан без работающего LLM-слоя не стартует.
-func buildLLMComposite(b *config.Bundle, labels []string) (scanengine.LLMClassifier, scanengine.LLMIdentity, error) {
+// S9-3: instruction — нормализованная пользовательская инструкция ("" — без неё),
+// добавляется в system-промпт обоих прокси; снимок неизменяем на прогон.
+func buildLLMComposite(b *config.Bundle, labels []string, instruction string) (scanengine.LLMClassifier, scanengine.LLMIdentity, error) {
 	agents := b.Detectors.Agents
 	if len(agents) == 0 {
 		return nil, scanengine.LLMIdentity{}, errors.New("реестр agents пуст (detectors.yaml)")
@@ -429,7 +453,7 @@ func buildLLMComposite(b *config.Bundle, labels []string) (scanengine.LLMClassif
 		return nil, scanengine.LLMIdentity{}, fmt.Errorf("env %s не задан (api_key_env агента %s)", main.APIKeyEnv, main.ID)
 	}
 	gate := agentproxy.NewGate(b.Detectors.Proxy.MaxConcurrent, b.Detectors.Proxy.RateLimitRPS)
-	mainProxy, err := newAgentProxy(main, key, b.Taxonomy.Version, labels, gate, b.Detectors.Proxy.Offline)
+	mainProxy, err := newAgentProxy(main, key, b.Taxonomy.Version, labels, gate, b.Detectors.Proxy.Offline, instruction)
 	if err != nil {
 		return nil, scanengine.LLMIdentity{}, err
 	}
@@ -446,7 +470,7 @@ func buildLLMComposite(b *config.Bundle, labels []string) (scanengine.LLMClassif
 		if escKey == "" {
 			return nil, scanengine.LLMIdentity{}, fmt.Errorf("env %s не задан (api_key_env агента-верификатора %s)", esc.APIKeyEnv, esc.ID)
 		}
-		verifyProxy, err = newAgentProxy(*esc, escKey, b.Taxonomy.Version, labels, gate, b.Detectors.Proxy.Offline)
+		verifyProxy, err = newAgentProxy(*esc, escKey, b.Taxonomy.Version, labels, gate, b.Detectors.Proxy.Offline, instruction)
 		if err != nil {
 			return nil, scanengine.LLMIdentity{}, err
 		}
@@ -457,7 +481,7 @@ func buildLLMComposite(b *config.Bundle, labels []string) (scanengine.LLMClassif
 
 // newAgentProxy строит прокси агента с лимитами и egress-политикой (п. 10.4,
 // п. 10.7). Ошибка конструирования (в т.ч. запрет egress) — причина fail-fast.
-func newAgentProxy(a config.AgentSpec, apiKey, taxVersion string, labels []string, gate *agentproxy.Gate, offline bool) (*agentproxy.Proxy, error) {
+func newAgentProxy(a config.AgentSpec, apiKey, taxVersion string, labels []string, gate *agentproxy.Gate, offline bool, instruction string) (*agentproxy.Proxy, error) {
 	return agentproxy.New(agentproxy.Agent{
 		ID: a.ID, Endpoint: a.Endpoint, Model: a.Model, APIKey: apiKey,
 		MaxValuesPerCall: a.MaxValuesPerCall, Timeout: time.Duration(a.TimeoutS) * time.Second,
@@ -465,6 +489,7 @@ func newAgentProxy(a config.AgentSpec, apiKey, taxVersion string, labels []strin
 	}, labels, taxVersion,
 		agentproxy.WithGate(gate),
 		agentproxy.WithPolicy(agentproxy.Policy{Offline: offline, Allowlist: a.Allowlist}),
+		agentproxy.WithInstruction(instruction), // S9-3
 	)
 }
 
@@ -532,12 +557,14 @@ func newEngineRunner(b *config.Bundle, st *store.Store, log *slog.Logger, useLLM
 // Start запускает прогон в фоне и возвращает scan_id сразу (п. 11.2 POST
 // /scans → {scan_id}). Источник/профиль/подключение валидируются до старта —
 // клиент получает осмысленную ошибку, а не «прогон умер в фоне».
-// actor — автор аудит-событий прогона (п. 14.2: sso:<subject>/token:<id>/api).
-func (r *engineRunner) Start(source, profile, actor string) (string, error) {
-	return r.start(source, profile, actor, nil)
+// opts.Actor — автор аудит-событий прогона (п. 14.2: sso:<subject>/token:<id>/api);
+// opts.UserPrompt/LLM — per-scan промпт и включение слоя (S9-3).
+func (r *engineRunner) Start(opts scanengine.ScanOptions) (string, error) {
+	return r.start(opts, nil)
 }
 
-// Resume продолжает конкретный partial/interrupted прогон с его профилем.
+// Resume продолжает конкретный partial/interrupted прогон с его профилем,
+// промптом и флагом LLM (S9-3: воспроизводимость исходного прогона).
 func (r *engineRunner) Resume(scanID, actor string) (string, error) {
 	prev, err := r.st.GetScan(context.Background(), scanID)
 	if err != nil {
@@ -546,10 +573,25 @@ func (r *engineRunner) Resume(scanID, actor string) (string, error) {
 	if prev.Status != "partial" && prev.Status != "interrupted" {
 		return "", &api.ScanConflictError{Reason: "продолжить можно только partial/interrupted прогон"}
 	}
-	return r.start(prev.SourceName, prev.Profile, actor, prev)
+	return r.start(scanengine.ScanOptions{
+		Source: prev.SourceName, Profile: prev.Profile, Actor: actor,
+		UserPrompt: prev.PromptText, LLM: &prev.LLMEnabled,
+	}, prev)
 }
 
-func (r *engineRunner) start(source, profile, actor string, prev *store.Scan) (string, error) {
+func (r *engineRunner) start(opts scanengine.ScanOptions, prev *store.Scan) (string, error) {
+	userPrompt, err := prompts.NormalizeUser(opts.UserPrompt) // S9-3: fail-closed
+	if err != nil {
+		return "", &api.BadScanRequestError{Reason: "user_prompt: " + err.Error()}
+	}
+	promptHash := prompts.UserHash(userPrompt)
+	llmEff := r.useLLM // S9-3: per-scan override; nil — глобальный default
+	if opts.LLM != nil {
+		llmEff = *opts.LLM
+	}
+	source := opts.Source
+	profile := opts.Profile
+	actor := opts.Actor
 	b := r.bundle()
 	src, err := findSource(b.Connections, source)
 	if err != nil {
@@ -567,7 +609,10 @@ func (r *engineRunner) start(source, profile, actor string, prev *store.Scan) (s
 	cfg.MaxTables = src.TablesLimit()
 	cfg.QueryTimeout = src.QueryTimeout()
 	cfg.BinaryVersion = Version
-	cfg.ConfigFingerprint, err = config.ScanFingerprint(b, src, profile, r.useLLM)
+	cfg.UserPrompt = userPrompt // S9-3: неизменяемый снимок на прогон
+	cfg.UserPromptHash = promptHash
+	cfg.PromptBaseVersion = prompts.Version
+	cfg.ConfigFingerprint, err = config.ScanFingerprint(b, src, profile, llmEff, promptHash)
 	if err != nil {
 		return "", fmt.Errorf("fingerprint конфигурации: %w", err)
 	}
@@ -601,8 +646,8 @@ func (r *engineRunner) start(source, profile, actor string, prev *store.Scan) (s
 
 	var llm scanengine.LLMClassifier
 	var llmID scanengine.LLMIdentity
-	if r.useLLM {
-		llm, llmID, err = buildLLMComposite(b, taxonomyLabels(b.Taxonomy))
+	if llmEff {
+		llm, llmID, err = buildLLMComposite(b, taxonomyLabels(b.Taxonomy), userPrompt)
 		if err != nil {
 			conn.Close()
 			return "", &api.SourceUnavailableError{Reason: fmt.Sprintf("llm-слой: %v", err)}

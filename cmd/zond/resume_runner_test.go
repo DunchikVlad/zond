@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DunchikVlad/zond/internal/agentproxy/prompts"
 	"github.com/DunchikVlad/zond/internal/config"
 	"github.com/DunchikVlad/zond/internal/connector"
 	"github.com/DunchikVlad/zond/internal/scanengine"
@@ -32,13 +33,15 @@ func TestRunnerResumeProvenance(t *testing.T) {
 	}
 	defer st.Close()
 	r := newEngineRunner(b, st, slog.New(slog.DiscardHandler), false, nil)
-	fingerprint, err := config.ScanFingerprint(b, &b.Connections.Sources[0], "deep", false)
+	fingerprint, err := config.ScanFingerprint(b, &b.Connections.Sources[0], "deep", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	prev := &store.Scan{
 		ID: "old", SourceName: "db", Profile: "deep", Status: "partial", StartedAt: time.Now().UTC(),
 		ConfigFingerprint: fingerprint, TaxonomyVersion: "1", DetectorsVersion: "1", BinaryVersion: Version,
+		// S9-3: provenance промпта совпадает с текущим раннером (стандартный промпт).
+		PromptBaseVersion: prompts.Version, PromptHash: "",
 	}
 	if err := st.SaveScan(context.Background(), prev); err != nil {
 		t.Fatal(err)
@@ -52,7 +55,9 @@ func TestRunnerResumeProvenance(t *testing.T) {
 	}
 
 	bad := &store.Scan{ID: "bad", SourceName: "db", Profile: "deep", Status: "partial", StartedAt: time.Now().UTC(),
-		ConfigFingerprint: fingerprint, TaxonomyVersion: "old", DetectorsVersion: "1", BinaryVersion: "old"}
+		ConfigFingerprint: fingerprint, TaxonomyVersion: "old", DetectorsVersion: "1", BinaryVersion: "old",
+		// S9-3: provenance промпта корректен — mismatch'и ровно taxonomy/binary.
+		PromptBaseVersion: prompts.Version, PromptHash: ""}
 	if err := st.SaveScan(context.Background(), bad); err != nil {
 		t.Fatal(err)
 	}

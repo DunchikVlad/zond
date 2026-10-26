@@ -34,7 +34,8 @@ func normalizePage(limit, offset, def int) (int, int) {
 }
 
 const scanSelectColumns = `id, source_name, profile, status, started_at, finished_at, stats_json,
-	table_identity_version, config_fingerprint, taxonomy_version, detectors_version, binary_version`
+	table_identity_version, config_fingerprint, taxonomy_version, detectors_version, binary_version,
+	prompt_base_version, prompt_hash, prompt_text, llm_enabled`
 
 // ListScans возвращает прогоны по фильтру (сортировка: свежие первыми) и
 // общее число строк под фильтром (для пагинации UI).
@@ -93,12 +94,15 @@ func scanScanRow(r rowScanner) (Scan, error) {
 	var sc Scan
 	var startedAt string
 	var finishedAt sql.NullString
+	var llm int
 	err := r.Scan(&sc.ID, &sc.SourceName, &sc.Profile, &sc.Status,
 		&startedAt, &finishedAt, &sc.StatsJSON, &sc.TableIdentityVersion,
-		&sc.ConfigFingerprint, &sc.TaxonomyVersion, &sc.DetectorsVersion, &sc.BinaryVersion)
+		&sc.ConfigFingerprint, &sc.TaxonomyVersion, &sc.DetectorsVersion, &sc.BinaryVersion,
+		&sc.PromptBaseVersion, &sc.PromptHash, &sc.PromptText, &llm)
 	if err != nil {
 		return sc, err
 	}
+	sc.LLMEnabled = llm != 0
 	sc.StartedAt, _ = time.Parse(time.RFC3339, startedAt)
 	if finishedAt.Valid && finishedAt.String != "" {
 		t, _ := time.Parse(time.RFC3339, finishedAt.String)

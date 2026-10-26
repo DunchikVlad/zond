@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/DunchikVlad/zond/internal/agentproxy"
+	"github.com/DunchikVlad/zond/internal/agentproxy/prompts"
 	"github.com/DunchikVlad/zond/internal/verdict"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 )
@@ -18,7 +19,7 @@ func llmReasonAnswer() *fakeLLMClassifier {
 	return &fakeLLMClassifier{
 		classifyResult: &agentproxy.ClassifyResult{
 			Label: "PERSON_NAME", Confidence: 0.92, Sensitivity: "PII",
-			ReasonRU: "похоже на персональные имена", PromptVersion: "1",
+			ReasonRU: "похоже на персональные имена", PromptVersion: prompts.Version,
 		},
 	}
 }
@@ -87,7 +88,7 @@ func TestLLMStatusMiss(t *testing.T) {
 		default:
 			t.Fatalf("неизвестная операция вызова: %+v", c)
 		}
-		if c.PromptVersion != "1" || c.TokensIn <= 0 || c.LatencyMS < 0 {
+		if c.PromptVersion != prompts.Version || c.TokensIn <= 0 || c.LatencyMS < 0 {
 			t.Fatalf("provenance вызова искажён: %+v", c)
 		}
 	}
@@ -111,7 +112,7 @@ func TestLLMStatusCacheHitParity(t *testing.T) {
 		t.Fatalf("первый скан: classify=%d, ожидался 1", llm.classifyCalls)
 	}
 	first := vs1["public.backup/phone_backup"]
-	if first.LLMStatus != verdict.LLMStatusCalled || first.PromptVersion != "1" {
+	if first.LLMStatus != verdict.LLMStatusCalled || first.PromptVersion != prompts.Version {
 		t.Fatalf("первый прогон: %+v", first)
 	}
 	fev, _ := first.Evidence["llm"].(map[string]any)
@@ -127,7 +128,7 @@ func TestLLMStatusCacheHitParity(t *testing.T) {
 	if v.LLMStatus != verdict.LLMStatusCacheHit {
 		t.Fatalf("llm_status=%q, ожидался cache_hit: %+v", v.LLMStatus, v)
 	}
-	if v.PromptVersion != "1" {
+	if v.PromptVersion != prompts.Version {
 		t.Fatalf("prompt_version при cache_hit не заполнен: %+v", v)
 	}
 	ev, ok := v.Evidence["llm"].(map[string]any)
@@ -166,7 +167,7 @@ func TestLLMStatusCacheHitParity(t *testing.T) {
 		c.AnswerSensitivity != "PII" || c.ReasonRU != "похоже на персональные имена" {
 		t.Fatalf("answer-поля cache_hit искажены: %+v", c)
 	}
-	if c.PromptVersion != "1" || c.TokensIn != 0 || c.CostUSD != 0 {
+	if c.PromptVersion != prompts.Version || c.TokensIn != 0 || c.CostUSD != 0 {
 		t.Fatalf("provenance cache_hit искажён: %+v", c)
 	}
 }

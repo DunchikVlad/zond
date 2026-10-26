@@ -16,6 +16,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/audit"
 	"github.com/DunchikVlad/zond/internal/auth"
 	"github.com/DunchikVlad/zond/internal/config"
+	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/verdict"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 	"gopkg.in/yaml.v3"
@@ -26,11 +27,15 @@ import (
 
 type fakeRunner struct {
 	started, stopped, resumed string
+	lastPrompt                string // S9-3: последний user_prompt формы
+	lastLLM                   *bool
 	resumeErr                 error
 }
 
-func (f *fakeRunner) Start(source, profile, actor string) (string, error) {
-	f.started = source
+func (f *fakeRunner) Start(o scanengine.ScanOptions) (string, error) {
+	f.started = o.Source
+	f.lastPrompt = o.UserPrompt
+	f.lastLLM = o.LLM
 	return "scan-1", nil
 }
 func (f *fakeRunner) Resume(scanID, actor string) (string, error) {

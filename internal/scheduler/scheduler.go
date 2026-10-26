@@ -14,7 +14,8 @@
 //     scheduler/retention_purge {removed_scans, cutoff});
 //
 //  3. периодические пересканы: для каждого источника cfg с непустым schedule
-//     (cron-выражение) — runner.Start(source, "", "scheduler"). Невалидное
+//     (cron-выражение) — runner.Start({Source, Actor:"scheduler"}) со
+//     стандартным промптом (S9-3). Невалидное
 //     выражение → warn-лог + аудит scheduler/invalid_schedule {source,
 //     schedule}, источник пропускается (старт не падает);
 //
@@ -44,6 +45,7 @@ import (
 
 	"github.com/DunchikVlad/zond/internal/audit"
 	"github.com/DunchikVlad/zond/internal/config"
+	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 )
 
@@ -64,7 +66,7 @@ const retentionAge = 90 * 24 * time.Hour
 // ScanStarter — тот же интерфейс, что api.ScanRunner/web.ScanRunner: запуск
 // асинхронного прогона (п. 11.2); реализация — runner поверх scanengine.
 type ScanStarter interface {
-	Start(source, profile, actor string) (string, error)
+	Start(opts scanengine.ScanOptions) (string, error)
 }
 
 // Scheduler — cron-планировщик фоновых задач инстанса (single-instance,
@@ -372,8 +374,10 @@ func (s *Scheduler) deferScan(ctx context.Context, source string, d time.Duratio
 }
 
 // startScan — немедленный старт перескана через runner (п. 15).
+// S9-3: scheduled-прогоны всегда идут со стандартным промптом (UserPrompt:"")
+// и default-поведением LLM (LLM:nil — как у сервера).
 func (s *Scheduler) startScan(source string) {
-	scanID, err := s.runner.Start(source, "", actor)
+	scanID, err := s.runner.Start(scanengine.ScanOptions{Source: source, Actor: actor})
 	if err != nil {
 		s.log.Warn("scheduler: перескан не запустился", "source", source, "error", err)
 		return

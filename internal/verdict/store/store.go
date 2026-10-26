@@ -90,6 +90,11 @@ type Scan struct {
 	TaxonomyVersion      string
 	DetectorsVersion     string
 	BinaryVersion        string
+	// S9-3: provenance пользовательского промпта и LLM-слоя скана.
+	PromptBaseVersion string
+	PromptHash        string
+	PromptText        string // исходный текст инструкции ("" — стандартный промпт)
+	LLMEnabled        bool
 }
 
 // SaveScan создаёт прогон.
@@ -97,12 +102,18 @@ func (s *Store) SaveScan(ctx context.Context, sc *Scan) error {
 	if sc.TableIdentityVersion == 0 {
 		sc.TableIdentityVersion = TableIdentityQualified
 	}
+	var llm int
+	if sc.LLMEnabled {
+		llm = 1
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO scans (id, source_name, profile, status, started_at, stats_json,
-			table_identity_version, config_fingerprint, taxonomy_version, detectors_version, binary_version)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			table_identity_version, config_fingerprint, taxonomy_version, detectors_version, binary_version,
+			prompt_base_version, prompt_hash, prompt_text, llm_enabled)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sc.ID, sc.SourceName, sc.Profile, sc.Status, sc.StartedAt.UTC().Format(time.RFC3339), sc.StatsJSON,
-		sc.TableIdentityVersion, sc.ConfigFingerprint, sc.TaxonomyVersion, sc.DetectorsVersion, sc.BinaryVersion)
+		sc.TableIdentityVersion, sc.ConfigFingerprint, sc.TaxonomyVersion, sc.DetectorsVersion, sc.BinaryVersion,
+		sc.PromptBaseVersion, sc.PromptHash, sc.PromptText, llm)
 	return err
 }
 

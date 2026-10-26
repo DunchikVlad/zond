@@ -59,16 +59,24 @@ type Usage struct {
 
 // Proxy — клиент Agent Proxy. Сессии: один вызов = один system+user (п. 10.3).
 type Proxy struct {
-	agent      Agent
-	labels     []string // enum лейблов таксономии
-	taxVersion string
-	http       *http.Client
-	gate       *Gate  // лимиты п. 10.4; nil — без ограничений
-	policy     Policy // egress п. 10.7; пустая — проверка отключена
+	agent       Agent
+	labels      []string // enum лейблов таксономии
+	taxVersion  string
+	instruction string // S9-3: пользовательская инструкция (нормализованная); "" — без неё
+	http        *http.Client
+	gate        *Gate  // лимиты п. 10.4; nil — без ограничений
+	policy      Policy // egress п. 10.7; пустая — проверка отключена
 }
 
 // Option — опция конструктора Proxy (лимиты и egress-политика).
 type Option func(*Proxy)
+
+// WithInstruction подключает пользовательскую инструкцию оператора (S9-3):
+// непустая нормализованная строка (prompts.NormalizeUser) добавляется в
+// system-промпт классификатора и верификатора как контекст предметной области.
+func WithInstruction(s string) Option {
+	return func(p *Proxy) { p.instruction = s }
+}
 
 // WithGate подключает лимитер вызовов: семафор + rate-limit (blueprint п. 10.4).
 // Gate разделяется между всеми прокси одного скана.
@@ -166,6 +174,9 @@ func (p *Proxy) Classify(ctx context.Context, nativeType string, values []string
 		defer p.gate.Release()
 	}
 	sys := prompts.System(p.labels)
+	if p.instruction != "" { // S9-3: контекст предметной области оператора
+		sys = prompts.SystemWithInstruction(p.labels, p.instruction)
+	}
 	usr := prompts.User(nativeType, p.taxVersion, masked)
 	var ans answerSchema
 	start := time.Now()
@@ -202,6 +213,9 @@ func (p *Proxy) Verify(ctx context.Context, candidate, nativeType string, values
 		defer p.gate.Release()
 	}
 	sys := prompts.VerifierSystem(p.labels)
+	if p.instruction != "" { // S9-3: та же инструкция, что у классификатора
+		sys = prompts.VerifierSystemWithInstruction(p.labels, p.instruction)
+	}
 	usr := prompts.VerifierUser(candidate, nativeType, p.taxVersion, masked)
 	var vs verifierSchema
 	start := time.Now()

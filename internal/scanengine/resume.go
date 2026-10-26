@@ -32,12 +32,16 @@ func (e *ResumeCompatibilityError) Error() string {
 }
 
 // ValidateResume fail-closed сверяет provenance до продолжения прогона.
+// S9-3: сверяются также версия базового промпта и хэш пользовательской
+// инструкции — пустые значения старых прогонов несовместимы, а не разрешение.
 func ValidateResume(prev *store.Scan, cfg Config) error {
 	current := []ResumeMismatch{
 		{Field: "config_fingerprint", Stored: prev.ConfigFingerprint, Current: cfg.ConfigFingerprint},
 		{Field: "taxonomy_version", Stored: prev.TaxonomyVersion, Current: cfg.TaxonomyVersion},
 		{Field: "detectors_version", Stored: prev.DetectorsVersion, Current: cfg.DetectorsVersion},
 		{Field: "binary_version", Stored: prev.BinaryVersion, Current: cfg.BinaryVersion},
+		{Field: "prompt_base_version", Stored: prev.PromptBaseVersion, Current: cfg.PromptBaseVersion},
+		{Field: "prompt_hash", Stored: prev.PromptHash, Current: cfg.UserPromptHash},
 	}
 	mismatches := make([]ResumeMismatch, 0, len(current))
 	for _, m := range current {

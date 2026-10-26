@@ -74,6 +74,15 @@ type Config struct {
 	// пропускаются (--resume, п. 13.2).
 	ResumeFrom string
 
+	// S9-3: пользовательская инструкция на скан (blueprint S9 п. 4).
+	// UserPrompt — нормализованный текст (prompts.NormalizeUser), "" — без неё;
+	// UserPromptHash — хэш (в ключ кэша и provenance); PromptBaseVersion —
+	// версия базового промпта (prompts.Version на момент старта). Снимок
+	// неизменяем: фиксируется в cfg до прогона, hot-reload не влияет.
+	UserPrompt        string
+	UserPromptHash    string
+	PromptBaseVersion string
+
 	// S8-2: per-source лимиты источника (п. 13.2, max_concurrent_tables /
 	// query_timeout_s из connections.yaml). MaxTables <= 0 — последовательная
 	// обработка (прежний путь); >0 — таблицы обрабатывают до MaxTables
@@ -99,6 +108,17 @@ type LLMIdentity struct {
 type LLMClassifier interface {
 	Classify(ctx context.Context, nativeType string, values []string) (*agentproxy.ClassifyResult, error)
 	Verify(ctx context.Context, candidate, nativeType string, values []string) (*agentproxy.VerifyResult, error)
+}
+
+// ScanOptions — единый набор параметров запуска прогона (S9-3): вместо
+// разрастания позиционных аргументов Start(source, profile, actor, …).
+// Проходит через UI/API/CLI/scheduler → runner → scanengine → agentproxy.
+type ScanOptions struct {
+	Source     string
+	Profile    string
+	Actor      string // автор аудит-событий прогона (п. 14.2)
+	UserPrompt string // нормализованная инструкция оператора; "" — стандартный промпт
+	LLM        *bool  // per-scan включение LLM; nil — глобальный default сервера (-llm)
 }
 
 // Engine — движок сканирования одного источника.
@@ -283,6 +303,9 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 		TableIdentityVersion: store.TableIdentityQualified,
 		ConfigFingerprint:    e.cfg.ConfigFingerprint, TaxonomyVersion: e.cfg.TaxonomyVersion,
 		DetectorsVersion: e.cfg.DetectorsVersion, BinaryVersion: e.cfg.BinaryVersion,
+		// S9-3: provenance промпта и LLM-слоя — для resume и различимости кэша.
+		PromptBaseVersion: e.cfg.PromptBaseVersion, PromptHash: e.cfg.UserPromptHash,
+		PromptText: e.cfg.UserPrompt, LLMEnabled: e.llm != nil,
 	}); err != nil {
 		return nil, fmt.Errorf("создание прогона: %w", err)
 	}
@@ -293,6 +316,13 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 	if e.cfg.ResumeFrom != "" {
 		startDetails["resume_from"] = e.cfg.ResumeFrom
 	}
+	// S9-3: аудит старта фиксирует actor/hash/длину промпта — без полного
+	// текста (он хранится в scans.prompt_text, в журнал достаточно хэша).
+	if e.cfg.UserPromptHash != "" {
+		startDetails["prompt_hash"] = e.cfg.UserPromptHash
+		startDetails["prompt_len"] = len([]rune(e.cfg.UserPrompt))
+	}
+	startDetails["llm"] = e.llm != nil
 	if err := e.st.AppendAudit(ctx, []audit.Event{e.scanEvent(scanID, "scan_start", startDetails)}); err != nil {
 		_ = e.st.FinishScan(ctx, scanID, "failed", "{}", e.nowFn())
 		return nil, fmt.Errorf("аудит старта скана: %w", err)
@@ -923,7 +953,7 @@ type cachedLLMVerdict struct {
 func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sampler.Pool, maskedVals []string, v *verdict.Verdict, ts *tableState) *agentproxy.ClassifyResult {
 	cacheKey := ""
 	if e.cfg.CacheScope != "" {
-		cacheKey = llmCacheKey(e.cfg.CacheScope, e.cfg.TaxonomyVersion, fingerprint.ValuesHash(maskedVals))
+		cacheKey = llmCacheKey(e.cfg.CacheScope, e.cfg.TaxonomyVersion, e.cfg.UserPromptHash, fingerprint.ValuesHash(maskedVals))
 		if cv, ok, err := e.st.CacheGet(ctx, cacheKey, e.nowFn()); err == nil && ok {
 			if cached, err := decodeCachedVerdict(cv.VerdictJSON); err == nil {
 				e.statsMu.Lock()
@@ -1223,10 +1253,12 @@ func decodeCachedVerdict(s string) (*agentproxy.ClassifyResult, error) {
 
 // llmCacheKey — составной ключ кэша (blueprint п. 10.5):
 // sha256(agent_id | model | prompt_version | taxonomy_version |
-// mask_profile_version | fingerprint(values)).
-func llmCacheKey(scope, taxonomyVersion, valuesHash string) string {
+// mask_profile_version | user_prompt_hash | fingerprint(values)).
+// S9-3: хэш пользовательской инструкции в ключе — разные промпты не делят
+// кэш; пустой хэш (стандартный промпт) сохраняет ключ прежней длины.
+func llmCacheKey(scope, taxonomyVersion, promptHash, valuesHash string) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
-		"llm-classify", scope, prompts.Version, taxonomyVersion, mask.Version, valuesHash,
+		"llm-classify", scope, prompts.Version, taxonomyVersion, mask.Version, promptHash, valuesHash,
 	}, "|")))
 	return hex.EncodeToString(sum[:])
 }

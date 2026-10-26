@@ -14,25 +14,28 @@ import (
 	"time"
 
 	"github.com/DunchikVlad/zond/internal/audit"
+	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/verdict"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 )
 
 // fakeRunner — тестовый ScanRunner.
 type fakeRunner struct {
-	started   map[string]string // scan_id → source
+	started   map[string]string        // scan_id → source
+	opts      []scanengine.ScanOptions // S9-3: последние параметры старта
 	stopped   []string
 	resumed   []string
 	startErr  error
 	resumeErr error
 }
 
-func (f *fakeRunner) Start(source, _, _ string) (string, error) {
+func (f *fakeRunner) Start(o scanengine.ScanOptions) (string, error) {
 	if f.startErr != nil {
 		return "", f.startErr
 	}
-	id := "scan-" + source
-	f.started[id] = source
+	id := "scan-" + o.Source
+	f.started[id] = o.Source
+	f.opts = append(f.opts, o)
 	return id, nil
 }
 

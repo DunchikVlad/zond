@@ -25,10 +25,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DunchikVlad/zond/internal/agentproxy/prompts"
 	"github.com/DunchikVlad/zond/internal/audit"
 	"github.com/DunchikVlad/zond/internal/auth"
 	"github.com/DunchikVlad/zond/internal/config"
 	"github.com/DunchikVlad/zond/internal/observe"
+	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/verdict"
 	"github.com/DunchikVlad/zond/internal/verdict/drift"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
@@ -41,9 +43,9 @@ var templatesFS embed.FS
 var staticFS embed.FS
 
 // ScanRunner — запуск/мягкая остановка прогонов из UI (тот же контракт, что
-// api.ScanRunner; serve передаёт engineRunner).
+// api.ScanRunner; serve передаёт engineRunner). S9-3: единый ScanOptions.
 type ScanRunner interface {
-	Start(source, profile, actor string) (string, error)
+	Start(opts scanengine.ScanOptions) (string, error)
 	Resume(scanID, actor string) (string, error)
 	Stop(scanID string) error
 }
@@ -403,8 +405,25 @@ func (s *Server) handleScanStart(w http.ResponseWriter, r *http.Request) {
 	}
 	source := r.FormValue("source")
 	profile := r.FormValue("profile")
+	prompt, err := prompts.NormalizeUser(r.FormValue("user_prompt")) // S9-3
+	if err != nil {
+		s.renderError(w, http.StatusBadRequest, "user_prompt: "+err.Error())
+		return
+	}
+	// S9-3: per-scan включение LLM: "" — default сервера, "true"/"false" — явно.
+	var llm *bool
+	switch v := r.FormValue("llm"); v {
+	case "true":
+		b := true
+		llm = &b
+	case "false":
+		b := false
+		llm = &b
+	}
 	actor := s.subject(r).Actor
-	scanID, err := s.runner.Start(source, profile, actor)
+	scanID, err := s.runner.Start(scanengine.ScanOptions{
+		Source: source, Profile: profile, Actor: actor, UserPrompt: prompt, LLM: llm,
+	})
 	if err != nil {
 		s.renderError(w, http.StatusBadGateway, "старт прогона: "+err.Error())
 		return

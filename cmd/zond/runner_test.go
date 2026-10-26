@@ -12,6 +12,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/api"
 	"github.com/DunchikVlad/zond/internal/config"
 	"github.com/DunchikVlad/zond/internal/connector"
+	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 )
 
@@ -73,12 +74,12 @@ func TestRunnerMaxConcurrentScans(t *testing.T) {
 	defer st.Close()
 	r := newEngineRunner(b, st, slog.New(slog.DiscardHandler), false, nil)
 
-	if _, err := r.Start("gated", "", "test"); err != nil {
+	if _, err := r.Start(scanengine.ScanOptions{Source: "gated", Actor: "test"}); err != nil {
 		t.Fatalf("первый старт: %v", err)
 	}
 	// Слот занят (первый прогон заблокирован в ListTables): второй старт —
 	// отказ 502 source_unavailable (п. 13.2).
-	_, err = r.Start("gated", "", "test")
+	_, err = r.Start(scanengine.ScanOptions{Source: "gated", Actor: "test"})
 	var unavail *api.SourceUnavailableError
 	if !errors.As(err, &unavail) {
 		t.Fatalf("второй старт при занятом слоте: ожидался SourceUnavailableError, получено %v", err)
@@ -88,7 +89,7 @@ func TestRunnerMaxConcurrentScans(t *testing.T) {
 	close(release)
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		_, err = r.Start("gated", "", "test")
+		_, err = r.Start(scanengine.ScanOptions{Source: "gated", Actor: "test"})
 		if err == nil {
 			break
 		}
@@ -133,11 +134,11 @@ func TestRunnerScansLimitAboveOne(t *testing.T) {
 	r := newEngineRunner(b, st, slog.New(slog.DiscardHandler), false, nil)
 
 	for i := 0; i < 2; i++ {
-		if _, err := r.Start("gated", "", "test"); err != nil {
+		if _, err := r.Start(scanengine.ScanOptions{Source: "gated", Actor: "test"}); err != nil {
 			t.Fatalf("старт %d при лимите 2: %v", i+1, err)
 		}
 	}
-	_, err = r.Start("gated", "", "test")
+	_, err = r.Start(scanengine.ScanOptions{Source: "gated", Actor: "test"})
 	var unavail *api.SourceUnavailableError
 	if !errors.As(err, &unavail) {
 		t.Fatalf("третий старт при лимите 2: ожидался SourceUnavailableError, получено %v", err)

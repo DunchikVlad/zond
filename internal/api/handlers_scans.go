@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/DunchikVlad/zond/internal/agentproxy/prompts"
 	"github.com/DunchikVlad/zond/internal/audit"
 	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
@@ -104,23 +105,32 @@ func (s *Server) handleScanGet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// startRequest — тело POST /api/v1/scans (п. 11.2): {source, profile}.
+// startRequest — тело POST /api/v1/scans (п. 11.2, S9-3):
+// {source, profile, user_prompt?, llm?}. user_prompt — дополнительная
+// инструкция оператора (≤2000 символов, лимит body 1 МБ, строгий разбор
+// JSON: неизвестные поля отклоняются); llm — per-scan включение слоя.
 type startRequest struct {
-	Source  string `json:"source"`
-	Profile string `json:"profile"`
+	Source     string `json:"source"`
+	Profile    string `json:"profile"`
+	UserPrompt string `json:"user_prompt"`
+	LLM        *bool  `json:"llm"`
 }
 
-// handleScanStart — POST /api/v1/scans {source, profile} → {scan_id}.
-// Асинхронно: прогон исполняется фоном; аудит scan_start пишет движок
-// (actor api). Ошибка недоступного источника — source_unavailable (п. 11.2).
+// handleScanStart — POST /api/v1/scans {source, profile, user_prompt?, llm?}
+// → {scan_id}. Асинхронно: прогон исполняется фоном; аудит scan_start пишет
+// движок (actor api, S9-3: с prompt_hash/длиной). Ошибка недоступного
+// источника — source_unavailable (п. 11.2).
 func (s *Server) handleScanStart(w http.ResponseWriter, r *http.Request) {
 	if s.runner == nil {
 		writeError(w, http.StatusNotImplemented, CodeInvalidRequest,
 			"запуск сканов недоступен: сервер без runner", nil)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // S9-3: лимит тела старта
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields() // строгий разбор: опечатки полей — 400
 	var req startRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := dec.Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, CodeInvalidRequest, "тело запроса: "+err.Error(), nil)
 		return
 	}
@@ -128,7 +138,15 @@ func (s *Server) handleScanStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, CodeInvalidRequest, "поле source обязательно", nil)
 		return
 	}
-	scanID, err := s.runner.Start(req.Source, req.Profile, s.actorFromCtx(r))
+	prompt, err := prompts.NormalizeUser(req.UserPrompt) // S9-3: fail-closed на границе
+	if err != nil {
+		writeError(w, http.StatusBadRequest, CodeInvalidRequest, "user_prompt: "+err.Error(), nil)
+		return
+	}
+	scanID, err := s.runner.Start(scanengine.ScanOptions{
+		Source: req.Source, Profile: req.Profile,
+		Actor: s.actorFromCtx(r), UserPrompt: prompt, LLM: req.LLM,
+	})
 	if err != nil {
 		var unf *SourceUnavailableError
 		if errors.As(err, &unf) {

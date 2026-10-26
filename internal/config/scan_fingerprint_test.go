@@ -8,22 +8,27 @@ func TestScanFingerprint(t *testing.T) {
 		Taxonomy:  &Taxonomy{Version: "1"},
 	}
 	src := &Source{Name: "db", Type: "clickhouse", DSN: "clickhouse://user:old@localhost:9000/default"}
-	first, err := ScanFingerprint(b, src, "deep", false)
+	first, err := ScanFingerprint(b, src, "deep", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, _ := ScanFingerprint(b, src, "deep", false)
+	again, _ := ScanFingerprint(b, src, "deep", false, "")
 	if first != again {
 		t.Fatal("fingerprint недетерминирован")
 	}
 	src.DSN = "clickhouse://user:new@localhost:9000/default"
-	rotated, _ := ScanFingerprint(b, src, "deep", false)
+	rotated, _ := ScanFingerprint(b, src, "deep", false, "")
 	if first != rotated {
 		t.Fatal("ротация пароля не должна менять fingerprint")
 	}
 	b.Detectors.Ensemble.Weights["rules"] = 2
-	changed, _ := ScanFingerprint(b, src, "deep", false)
+	changed, _ := ScanFingerprint(b, src, "deep", false, "")
 	if first == changed {
 		t.Fatal("изменение детекторов не отражено в fingerprint")
+	}
+	// S9-3: пользовательская инструкция — часть эффективного снимка.
+	withPrompt, _ := ScanFingerprint(b, src, "deep", false, "abc123")
+	if withPrompt == changed {
+		t.Fatal("изменение user_prompt_hash не отражено в fingerprint")
 	}
 }

@@ -16,20 +16,27 @@ import (
 
 	"github.com/DunchikVlad/zond/internal/audit"
 	"github.com/DunchikVlad/zond/internal/config"
+	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 )
 
 // fakeStarter — тестовый ScanStarter: считает запуски.
 type fakeStarter struct {
-	mu     sync.Mutex
-	actors []string
+	mu      sync.Mutex
+	actors  []string
+	prompts []string // S9-3: зафиксированные user_prompt (ожидается пустые)
+	llmSet  int      // S9-3: сколько стартов передали явный LLM-override
 }
 
-func (f *fakeStarter) Start(source, _, actor string) (string, error) {
+func (f *fakeStarter) Start(o scanengine.ScanOptions) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.actors = append(f.actors, source+"|"+actor)
-	return "scan-" + source, nil
+	f.actors = append(f.actors, o.Source+"|"+o.Actor)
+	f.prompts = append(f.prompts, o.UserPrompt)
+	if o.LLM != nil {
+		f.llmSet++
+	}
+	return "scan-" + o.Source, nil
 }
 
 func (f *fakeStarter) calls() int {
@@ -188,6 +195,17 @@ func TestSchedulerRescanAndInvalidSchedule(t *testing.T) {
 	waitFor(t, 5*time.Second, "периодический перескан", func() bool { return runner.calls() >= 1 })
 	if got := auditActions(t, st, "scheduler/invalid_schedule"); len(got) != 1 {
 		t.Fatalf("аудит invalid_schedule: %d событий", len(got))
+	}
+	// S9-3: scheduled-прогоны — стандартный промпт и default-поведение LLM.
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	for _, p := range runner.prompts {
+		if p != "" {
+			t.Fatalf("scheduler передал пользовательский промпт: %q", p)
+		}
+	}
+	if runner.llmSet != 0 {
+		t.Fatalf("scheduler передал LLM-override в %d стартов", runner.llmSet)
 	}
 }
 

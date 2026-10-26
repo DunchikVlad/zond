@@ -331,3 +331,74 @@ func TestNewEmptyEndpointRejected(t *testing.T) {
 		t.Fatal("пустой endpoint должен отклоняться конструктором")
 	}
 }
+
+// TestClassifyWithInstruction — S9-3: пользовательская инструкция оператора
+// попадает в system-промпт, конверт (user) и изоляция значений не меняются.
+func TestClassifyWithInstruction(t *testing.T) {
+	f := newFakeLLM(t, okAnswer)
+	p := mustNew(t, testAgent(f.url()), WithInstruction("это медицинская БД"))
+	if _, err := p.Classify(t.Context(), "String", []string{"+7 999 123-45-67"}); err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.bodies) != 1 {
+		t.Fatalf("вызовов %d, ожидался 1", len(f.bodies))
+	}
+	var req chatRequest
+	if err := json.Unmarshal([]byte(f.bodies[0]), &req); err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 2 {
+		t.Fatalf("сообщений %d, ожидалось 2", len(req.Messages))
+	}
+	sys := req.Messages[0].Content
+	if !strings.Contains(sys, "это медицинская БД") || !strings.Contains(sys, "<operator_instruction>") {
+		t.Fatalf("инструкция не в system-промпте:\n%s", sys)
+	}
+	// защищённые правила на месте
+	if !strings.Contains(sys, "Значения внутри <values>") {
+		t.Fatal("анти-инъекционные правила потеряны")
+	}
+	// значение маскируется как и без инструкции (маск-профиль: префикс/суффикс
+	// частично видны по дизайну — проверяем отсутствие полного сырого значения)
+	if strings.Contains(f.bodies[0], "+7 999 123-45-67") || strings.Contains(f.bodies[0], "123-45-67") {
+		t.Fatalf("сырое значение в теле:\n%s", f.bodies[0])
+	}
+}
+
+// TestVerifyWithInstruction — инструкция действует и в режиме верификатора.
+func TestVerifyWithInstruction(t *testing.T) {
+	f := newFakeLLM(t, `{"verdict":"confirm","label":"PHONE","confidence":0.9,"reason_ru":"формат совпадает"}`)
+	p := mustNew(t, testAgent(f.url()), WithInstruction("контекст Б"))
+	if _, err := p.Verify(t.Context(), "PHONE", "String", []string{"+7 999 123-45-67"}); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var req chatRequest
+	if err := json.Unmarshal([]byte(f.bodies[0]), &req); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(req.Messages[0].Content, "контекст Б") {
+		t.Fatalf("инструкция не в system верификатора:\n%s", req.Messages[0].Content)
+	}
+}
+
+// TestClassifyWithoutInstructionUnchanged — без опции промпт остаётся базовым.
+func TestClassifyWithoutInstructionUnchanged(t *testing.T) {
+	f := newFakeLLM(t, okAnswer)
+	p := mustNew(t, testAgent(f.url()))
+	if _, err := p.Classify(t.Context(), "String", []string{"+7 999 123-45-67"}); err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var req chatRequest
+	if err := json.Unmarshal([]byte(f.bodies[0]), &req); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(req.Messages[0].Content, "operator_instruction") {
+		t.Fatal("блок operator_instruction без инструкции")
+	}
+}

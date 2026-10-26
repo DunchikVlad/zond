@@ -22,6 +22,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/auth"
 	"github.com/DunchikVlad/zond/internal/logging"
 	"github.com/DunchikVlad/zond/internal/observe"
+	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 )
 
@@ -45,9 +46,11 @@ const Actor = "api"
 // runner поверх scanengine (serve); в тестах — fake.
 type ScanRunner interface {
 	// Start запускает прогон в фоне и возвращает scan_id сразу;
-	// actor — автор аудит-событий прогона (п. 14.2).
-	Start(source, profile, actor string) (string, error)
-	// Resume продолжает partial/interrupted прогон после сверки provenance.
+	// opts.Actor — автор аудит-событий прогона (п. 14.2), opts.UserPrompt и
+	// opts.LLM — per-scan промпт и включение LLM (S9-3).
+	Start(opts scanengine.ScanOptions) (string, error)
+	// Resume продолжает partial/interrupted прогон после сверки provenance;
+	// промпт и флаг LLM воспроизводятся из исходного прогона (S9-3).
 	Resume(scanID, actor string) (string, error)
 	// Stop мягко останавливает прогон (ctx-отмена; статус interrupted).
 	Stop(scanID string) error

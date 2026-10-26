@@ -10,6 +10,14 @@
     <option value="deep" selected>deep</option>
     <option value="custom">custom</option>
   </select>
+  <select name="llm" title="LLM-слой (S9-3): по умолчанию — поведение сервера">
+    <option value="">LLM: default</option>
+    <option value="true">LLM: вкл</option>
+    <option value="false">LLM: выкл</option>
+  </select>
+  <br>
+  <textarea name="user_prompt" rows="3" cols="60" maxlength="2000"
+    placeholder="Дополнительная инструкция для LLM (контекст предметной области, ≤2000 символов; пусто — стандартный промпт)"></textarea>
   <button type="submit">Запустить скан</button>
 </form>
 {{end}}
