@@ -1,16 +1,14 @@
 {{template "header" .}}
 {{if .Msg}}<p class="msg">{{.Msg}}</p>{{end}}
 
-<p class="ev">Правка connections.yaml через UI: применяется сразу (без рестарта) —
-перечитывается конфиг, перестраиваются расписания пересканов. Перед записью
-создаётся файл <code>.bak</code>. Пароль в строке подключения — только как
-<code>${ENV_NAME}</code> (blueprint п. 12): значение переменной задаётся в
-окружении сервиса (на стенде — /opt/zond/zond.env) и требует рестарта,
-если переменная новая.</p>
+<p class="ev">Правка connections.yaml применяется сразу: конфиг перечитывается,
+расписания перестраиваются, перед записью создаётся <code>.bak</code>. При ошибке
+применения или аудита изменение откатывается. Пароль — только целиком как
+<code>${ENV_NAME}</code>; переменная должна существовать в окружении сервиса.</p>
 
 <h2>Источники</h2>
 <table>
-  <tr><th>Имя</th><th>Тип</th><th>Подключение</th><th>Расписание перескана</th><th>Окно сканирования</th><th></th></tr>
+  <tr><th>Имя</th><th>Тип</th><th>Подключение</th><th>Расписание</th><th>Окно</th><th>Лимиты: сканы / таблицы / timeout, с</th><th></th></tr>
   {{range .Sources}}
   <tr>
     <form method="post" action="/sources/save">
@@ -20,10 +18,14 @@
       <option value="clickhouse" {{if eq .Type "clickhouse"}}selected{{end}}>clickhouse</option>
       <option value="mongodb" {{if eq .Type "mongodb"}}selected{{end}}>mongodb</option>
     </select></td>
-    <td><input name="dsn" value="{{.DSN}}" size="34" placeholder="clickhouse://user:${ENV}@host:9000/db">
-        <input name="uri" value="{{.URI}}" size="34" placeholder="mongodb://user:${ENV}@host:27017/db"></td>
+    <td><input name="dsn" value="{{.DSN}}" size="28" placeholder="clickhouse://user:${ENV}@host:9000/db">
+        <input name="uri" value="{{.URI}}" size="28" placeholder="mongodb://user:${ENV}@host:27017/db">
+        <input name="ref" value="{{.Ref}}" size="12" placeholder="Vault ref"></td>
     <td><input name="schedule" value="{{.Schedule}}" size="12" placeholder="0 2 * * *"></td>
     <td><input name="scan_window" value="{{.ScanWindow}}" size="12" placeholder="02:00-06:00"></td>
+    <td><input name="max_concurrent_scans" value="{{.MaxConcurrentScans}}" size="3" title="max_concurrent_scans">
+        <input name="max_concurrent_tables" value="{{.MaxConcurrentTables}}" size="3" title="max_concurrent_tables">
+        <input name="query_timeout_s" value="{{.QueryTimeoutS}}" size="4" title="query_timeout_s"></td>
     <td>
       <button type="submit">Сохранить</button>
       <button hx-post="/sources/test" hx-include="closest tr" hx-target="#test-{{.Name}}"
@@ -35,7 +37,7 @@
       <button type="submit" class="danger" hx-confirm="Удалить источник {{.Name}}?">Удалить</button>
     </form></td>
   </tr>
-  <tr><td colspan="6" id="test-{{.Name}}"></td></tr>
+  <tr><td colspan="7" id="test-{{.Name}}"></td></tr>
   {{end}}
 </table>
 
@@ -47,10 +49,14 @@
     <option value="clickhouse">clickhouse</option>
     <option value="mongodb">mongodb</option>
   </select>
-  <input name="dsn" placeholder="clickhouse://user:${ENV}@host:9000/db" size="40">
-  <input name="uri" placeholder="mongodb://user:${ENV}@host:27017/db" size="40">
+  <input name="dsn" placeholder="clickhouse://user:${ENV}@host:9000/db" size="34">
+  <input name="uri" placeholder="mongodb://user:${ENV}@host:27017/db" size="34">
+  <input name="ref" placeholder="Vault ref" size="14">
   <input name="schedule" placeholder="расписание cron, напр. 0 2 * * *" size="14">
   <input name="scan_window" placeholder="окно HH:MM-HH:MM" size="12">
+  <input name="max_concurrent_scans" placeholder="сканы" size="4">
+  <input name="max_concurrent_tables" placeholder="таблицы" size="4">
+  <input name="query_timeout_s" placeholder="timeout, с" size="6">
   <button type="submit">Добавить</button>
 </form>
 {{template "footer" .}}

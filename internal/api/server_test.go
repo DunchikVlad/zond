@@ -20,9 +20,11 @@ import (
 
 // fakeRunner — тестовый ScanRunner.
 type fakeRunner struct {
-	started  map[string]string // scan_id → source
-	stopped  []string
-	startErr error
+	started   map[string]string // scan_id → source
+	stopped   []string
+	resumed   []string
+	startErr  error
+	resumeErr error
 }
 
 func (f *fakeRunner) Start(source, _, _ string) (string, error) {
@@ -32,6 +34,14 @@ func (f *fakeRunner) Start(source, _, _ string) (string, error) {
 	id := "scan-" + source
 	f.started[id] = source
 	return id, nil
+}
+
+func (f *fakeRunner) Resume(scanID, _ string) (string, error) {
+	if f.resumeErr != nil {
+		return "", f.resumeErr
+	}
+	f.resumed = append(f.resumed, scanID)
+	return "resumed-" + scanID, nil
 }
 
 func (f *fakeRunner) Stop(scanID string) error {

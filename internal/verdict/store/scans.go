@@ -33,6 +33,9 @@ func normalizePage(limit, offset, def int) (int, int) {
 	return limit, offset
 }
 
+const scanSelectColumns = `id, source_name, profile, status, started_at, finished_at, stats_json,
+	table_identity_version, config_fingerprint, taxonomy_version, detectors_version, binary_version`
+
 // ListScans возвращает прогоны по фильтру (сортировка: свежие первыми) и
 // общее число строк под фильтром (для пагинации UI).
 func (s *Store) ListScans(ctx context.Context, f ScanFilter) ([]Scan, int, error) {
@@ -55,7 +58,7 @@ func (s *Store) ListScans(ctx context.Context, f ScanFilter) ([]Scan, int, error
 		`SELECT COUNT(*) FROM scans`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	q := `SELECT id, source_name, profile, status, started_at, finished_at, stats_json
+	q := `SELECT ` + scanSelectColumns + `
 	      FROM scans` + where + ` ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`
 	rows, err := s.db.QueryContext(ctx, q, append(args, limit, offset)...)
 	if err != nil {
@@ -77,7 +80,7 @@ func (s *Store) ListScans(ctx context.Context, f ScanFilter) ([]Scan, int, error
 // (API отображает в scan_not_found, п. 11.2).
 func (s *Store) GetScan(ctx context.Context, id string) (*Scan, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, source_name, profile, status, started_at, finished_at, stats_json
+		SELECT `+scanSelectColumns+`
 		FROM scans WHERE id = ?`, id)
 	sc, err := scanScanRow(row)
 	if err != nil {
@@ -91,7 +94,8 @@ func scanScanRow(r rowScanner) (Scan, error) {
 	var startedAt string
 	var finishedAt sql.NullString
 	err := r.Scan(&sc.ID, &sc.SourceName, &sc.Profile, &sc.Status,
-		&startedAt, &finishedAt, &sc.StatsJSON)
+		&startedAt, &finishedAt, &sc.StatsJSON, &sc.TableIdentityVersion,
+		&sc.ConfigFingerprint, &sc.TaxonomyVersion, &sc.DetectorsVersion, &sc.BinaryVersion)
 	if err != nil {
 		return sc, err
 	}

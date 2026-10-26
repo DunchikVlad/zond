@@ -205,14 +205,14 @@ func TestEndToEndScan(t *testing.T) {
 		status verdict.ReviewStatus
 		layer  verdict.EvidenceLayer
 	}{
-		{"users/email", "EMAIL", verdict.StatusAutoAccepted, verdict.LayerEnsemble},
+		{"public.users/email", "EMAIL", verdict.StatusAutoAccepted, verdict.LayerEnsemble},
 		// phone: 2 валидных из 3 (доля 0.667 → conf 0.70 < tau 0.80) — серая зона;
 		// без LLM (nil) → pending (п. 7 правило 4/5). С LLM — эскалация (тест ниже).
-		{"users/phone", "PHONE", verdict.StatusPending, verdict.LayerEnsemble},
-		{"users/inn", "TAX_ID", verdict.StatusAutoAccepted, verdict.LayerRules},
-		{"users/created_at", "UNKNOWN", verdict.StatusPending, verdict.LayerEnsemble},
-		{"users/amount", "UNKNOWN", verdict.StatusPending, verdict.LayerEnsemble},
-		{"cards/pan", "CARD_NUMBER", verdict.StatusAutoAccepted, verdict.LayerRules},
+		{"public.users/phone", "PHONE", verdict.StatusPending, verdict.LayerEnsemble},
+		{"public.users/inn", "TAX_ID", verdict.StatusAutoAccepted, verdict.LayerRules},
+		{"public.users/created_at", "UNKNOWN", verdict.StatusPending, verdict.LayerEnsemble},
+		{"public.users/amount", "UNKNOWN", verdict.StatusPending, verdict.LayerEnsemble},
+		{"public.cards/pan", "CARD_NUMBER", verdict.StatusAutoAccepted, verdict.LayerRules},
 	}
 	for _, c := range cases {
 		v, ok := vs[c.path]
@@ -235,19 +235,19 @@ func TestEndToEndScan(t *testing.T) {
 	}
 
 	// checksum-победа: ИНН со 100% матчем → 0.99 rules
-	if v := vs["users/inn"]; v.Confidence != 0.99 {
+	if v := vs["public.users/inn"]; v.Confidence != 0.99 {
 		t.Errorf("ИНН: confidence=%v, ожидался 0.99 (checksum)", v.Confidence)
 	}
 	// PAN через Luhn → 0.99
-	if v := vs["cards/pan"]; v.Confidence != 0.99 {
+	if v := vs["public.cards/pan"]; v.Confidence != 0.99 {
 		t.Errorf("PAN: confidence=%v, ожидался 0.99", v.Confidence)
 	}
 	// evidence: правило п. 5.4 — без сырых значений, только статистика
-	ev, _ := vs["users/email"].Evidence["rules"].(map[string]any)
+	ev, _ := vs["public.users/email"].Evidence["rules"].(map[string]any)
 	if ev["rules/email"] == nil {
-		t.Errorf("evidence rules/email отсутствует: %+v", vs["users/email"].Evidence)
+		t.Errorf("evidence rules/email отсутствует: %+v", vs["public.users/email"].Evidence)
 	}
-	if stringInAnyMap(vs["users/email"].Evidence, "ivan@example.com") {
+	if stringInAnyMap(vs["public.users/email"].Evidence, "ivan@example.com") {
 		t.Error("сырое значение попало в evidence — запрещено ADR-0010")
 	}
 }
@@ -283,7 +283,7 @@ func TestGrayCorridorLLMEscalation(t *testing.T) {
 	eng.SetLLM(llm, LLMIdentity{AgentID: "zond-main", Model: "gpt-4o-mini"})
 	_, vs := scanAndList(t, eng, st, testSource())
 
-	v := vs["users/phone"]
+	v := vs["public.users/phone"]
 	if llm.classifyCalls == 0 {
 		t.Error("LLM-классификатор не вызван в сером коридоре")
 	}
@@ -314,7 +314,7 @@ func TestLLMNotCalledForChecksum(t *testing.T) {
 	}
 	eng.SetLLM(llm, LLMIdentity{AgentID: "zond-main", Model: "gpt-4o-mini"})
 	_, vs := scanAndList(t, eng, st, testSource())
-	if v := vs["users/inn"]; v.Confidence != 0.99 || v.EvidenceLayer != verdict.LayerRules {
+	if v := vs["public.users/inn"]; v.Confidence != 0.99 || v.EvidenceLayer != verdict.LayerRules {
 		t.Errorf("ИНН должен остаться checksum 0.99 rules: %+v", v)
 	}
 	// LLM мог вызваться для phone (серая зона), но не для checksum-колонок;
@@ -345,7 +345,7 @@ func TestNullHeavyColumnIsSmallSample(t *testing.T) {
 		conn.data["users"] = append(conn.data["users"], connector.Row{"created_at": nil})
 	}
 	_, vs := scanAndList(t, eng, st, conn)
-	v := vs["users/created_at"]
+	v := vs["public.users/created_at"]
 	if v.ReviewStatus != verdict.StatusPending || v.Label != "UNKNOWN" {
 		t.Fatalf("null>0.95 должен давать UNKNOWN+pending: %+v", v)
 	}
@@ -396,7 +396,7 @@ func TestVerdictEvidenceExamples(t *testing.T) {
 	eng, st := testEngine(t)
 	_, vs := scanAndList(t, eng, st, testSource())
 
-	v := vs["users/email"]
+	v := vs["public.users/email"]
 	sample, ok := v.Evidence["sample"].(map[string]any)
 	if !ok {
 		t.Fatalf("evidence sample отсутствует: %+v", v.Evidence)

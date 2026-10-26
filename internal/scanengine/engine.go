@@ -37,20 +37,22 @@ import (
 
 // Config — параметры движка, получаемые из detectors.yaml + taxonomy.yaml.
 type Config struct {
-	TauAccept        float64
-	TauReview        float64
-	Weights          map[string]float64 // meta | rules | llm (ensemble.weights)
-	GrayBand         [2]float64         // confidence_band агента (серая зона)
-	SampleMode       connector.SampleMode
-	SampleValue      float64
-	MaxRows          int64
-	MaxStringChars   int
-	Dedup            bool
-	MinValuesForLLM  int // сэмпл меньше — LLM не вызывается (п. 7)
-	TaxonomyVersion  string
-	DetectorsVersion string
-	Sensitivity      map[verdict.Label]verdict.Sensitivity
-	TaxonomyLabels   []string // enum лейблов для промпта LLM
+	TauAccept         float64
+	TauReview         float64
+	Weights           map[string]float64 // meta | rules | llm (ensemble.weights)
+	GrayBand          [2]float64         // confidence_band агента (серая зона)
+	SampleMode        connector.SampleMode
+	SampleValue       float64
+	MaxRows           int64
+	MaxStringChars    int
+	Dedup             bool
+	MinValuesForLLM   int // сэмпл меньше — LLM не вызывается (п. 7)
+	TaxonomyVersion   string
+	DetectorsVersion  string
+	ConfigFingerprint string
+	BinaryVersion     string
+	Sensitivity       map[verdict.Label]verdict.Sensitivity
+	TaxonomyLabels    []string // enum лейблов для промпта LLM
 
 	// Инкремент 4б: кэш вердиктов (п. 10.5) и кластеризация (п. 7.6).
 	CacheScope        string // "agent_id|model" — идентичность агента в ключе кэша; "" → кэш выключен
@@ -256,6 +258,18 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 		MaxTables:    e.cfg.MaxTables,
 		QueryTimeout: e.cfg.QueryTimeout,
 	}
+	if e.cfg.ResumeFrom != "" {
+		prev, err := e.st.GetScan(ctx, e.cfg.ResumeFrom)
+		if err != nil {
+			return nil, fmt.Errorf("resume: прогон %s: %w", e.cfg.ResumeFrom, err)
+		}
+		if prev.SourceName != sourceName || (prev.Status != "partial" && prev.Status != "interrupted") {
+			return nil, fmt.Errorf("resume: прогон %s не является partial/interrupted прогоном источника %q", prev.ID, sourceName)
+		}
+		if err := ValidateResume(prev, e.cfg); err != nil {
+			return nil, err
+		}
+	}
 	// Circuit breaker (п. 13.2): источник на паузе — прогон не начинается
 	// (строка scans не создаётся; до конца паузы — отказ с указанием until).
 	if e.cfg.Breaker != nil {
@@ -266,6 +280,9 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 	if err := e.st.SaveScan(ctx, &store.Scan{
 		ID: scanID, SourceName: sourceName, Profile: profile,
 		Status: "running", StartedAt: rep.StartedAt,
+		TableIdentityVersion: store.TableIdentityQualified,
+		ConfigFingerprint:    e.cfg.ConfigFingerprint, TaxonomyVersion: e.cfg.TaxonomyVersion,
+		DetectorsVersion: e.cfg.DetectorsVersion, BinaryVersion: e.cfg.BinaryVersion,
 	}); err != nil {
 		return nil, fmt.Errorf("создание прогона: %w", err)
 	}
@@ -314,7 +331,7 @@ func (e *Engine) ScanWithID(ctx context.Context, conn connector.Connector, sourc
 		}
 		remaining := tables[:0]
 		for _, t := range tables {
-			if !done[t.Name] {
+			if !done[t.QualifiedName()] {
 				remaining = append(remaining, t)
 			}
 		}
@@ -625,11 +642,12 @@ func (e *Engine) scanTableRetry(ctx context.Context, conn connector.Connector, s
 // query_timeout_s источника; исходный ctx — общий дедлайн прогона).
 func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID string, t connector.TableRef, rep *Report, ts *tableState) error {
 	ts.reset() // сброс буфера: вызовы failed-таблицы не должны попасть в чужой коммит (п. 13)
+	tableName := t.QualifiedName()
 	schemaCtx, cancelSchema := e.queryCtx(ctx)
 	cols, err := conn.GetSchema(schemaCtx, t)
 	cancelSchema()
 	if err != nil {
-		_ = e.st.MarkTable(ctx, scanID, t.Name, 0, "failed", err.Error(), string(connector.ClassifyFailure(err)))
+		_ = e.st.MarkTable(ctx, scanID, tableName, 0, "failed", err.Error(), string(connector.ClassifyFailure(err)))
 		return err
 	}
 	var rowCount int64
@@ -643,7 +661,7 @@ func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID
 		v, err := e.classifyColumn(ctx, conn, scanID, t, col, ts)
 		if err != nil {
 			// обрыв стрима сэмпла → таблица failed, чекпоинт (п. 6)
-			_ = e.st.MarkTable(ctx, scanID, t.Name, rowCount, "failed", err.Error(), string(connector.ClassifyFailure(err)))
+			_ = e.st.MarkTable(ctx, scanID, tableName, rowCount, "failed", err.Error(), string(connector.ClassifyFailure(err)))
 			return err
 		}
 		vs = append(vs, v)
@@ -651,10 +669,10 @@ func (e *Engine) scanTable(ctx context.Context, conn connector.Connector, scanID
 	// вердикты, учётные записи вызовов и аудит таблицы — одна транзакция
 	// (п. 13: либо всё, либо откат; ADR-0013: действие без аудита не совершено)
 	if err := e.st.SaveVerdictsWithCalls(ctx, vs, ts.takeCalls(), ts.takeEvents()); err != nil {
-		_ = e.st.MarkTable(ctx, scanID, t.Name, rowCount, "failed", err.Error(), string(connector.ClassifyFailure(err)))
+		_ = e.st.MarkTable(ctx, scanID, tableName, rowCount, "failed", err.Error(), string(connector.ClassifyFailure(err)))
 		return err
 	}
-	return e.st.MarkTable(ctx, scanID, t.Name, rowCount, "done", "", "")
+	return e.st.MarkTable(ctx, scanID, tableName, rowCount, "done", "", "")
 }
 
 // queryCtx — дедлайн запроса к БД поверх ctx прогона (п. 13.2:
@@ -698,11 +716,16 @@ func (e *Engine) classifyColumn(ctx context.Context, conn connector.Connector, s
 // серый коридор) → ensemble (п. 7). Вызовы/события LLM — в буфере таблицы
 // ts (S8-2: воркеры, п. 13.2); кластерер и счётчики — под мьютексами.
 func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRef, col connector.Column, pool *sampler.Pool, ts *tableState) verdict.Verdict {
-	sum := sha1.Sum([]byte(scanID + "|" + t.Name + "|" + col.Name)) // п. 5.4
+	h := sha1.New() // п. 5.4; length-prefix исключает неоднозначную склейку полей
+	tableName := t.QualifiedName()
+	for _, part := range []string{scanID, tableName, col.Name} {
+		fmt.Fprintf(h, "%d:", len(part))
+		_, _ = io.WriteString(h, part)
+	}
 	v := verdict.Verdict{
-		ID:               hex.EncodeToString(sum[:]),
+		ID:               hex.EncodeToString(h.Sum(nil)),
 		ScanID:           scanID,
-		Table:            t.Name,
+		Table:            tableName,
 		Path:             col.Name,
 		NativeType:       col.NativeType,
 		SampleSize:       len(pool.Values),

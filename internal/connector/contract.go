@@ -6,12 +6,22 @@ package connector
 import (
 	"context"
 	"iter"
+	"strings"
 )
 
 // TableRef — таблица/коллекция источника.
 type TableRef struct {
 	Schema string
 	Name   string
+}
+
+var qualifiedNameEscaper = strings.NewReplacer(`\`, `\\`, `.`, `\.`)
+
+// QualifiedName — устойчивый идентификатор schema.table для store и API.
+// Обратная косая черта и точка внутри компонентов экранируются, чтобы разные
+// пары Schema/Name не давали одинаковый ключ. Драйверы получают исходный TableRef.
+func (t TableRef) QualifiedName() string {
+	return qualifiedNameEscaper.Replace(t.Schema) + "." + qualifiedNameEscaper.Replace(t.Name)
 }
 
 // Column — колонка/путь источника.

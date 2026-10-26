@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/robfig/cron/v3"
@@ -13,12 +14,16 @@ import (
 // SourceEntry — редактируемое представление записи источника для UI (S8-7).
 // DSN/URI хранятся как в файле — с ${ENV}-литералами (п. 12).
 type SourceEntry struct {
-	Name       string `yaml:"name"`
-	Type       string `yaml:"type"` // clickhouse | mongodb
-	DSN        string `yaml:"dsn,omitempty"`
-	URI        string `yaml:"uri,omitempty"`
-	Schedule   string `yaml:"schedule,omitempty"`
-	ScanWindow string `yaml:"scan_window,omitempty"`
+	Name                string `yaml:"name"`
+	Type                string `yaml:"type"` // clickhouse | mongodb
+	DSN                 string `yaml:"dsn,omitempty"`
+	URI                 string `yaml:"uri,omitempty"`
+	Ref                 string `yaml:"ref,omitempty"`
+	Schedule            string `yaml:"schedule,omitempty"`
+	ScanWindow          string `yaml:"scan_window,omitempty"`
+	MaxConcurrentScans  int    `yaml:"max_concurrent_scans,omitempty"`
+	MaxConcurrentTables int    `yaml:"max_concurrent_tables,omitempty"`
+	QueryTimeoutS       int    `yaml:"query_timeout_s,omitempty"`
 }
 
 // SourceEditor — правка sources (включая schedule/scan_window) в raw
@@ -115,7 +120,7 @@ func (e *SourceEditor) Bytes() ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-// ValidateAll — строгая проверка итогового файла по схеме Connections
+// ValidateAll — strict decode и полная Connections.Validate итогового файла
 // (без ENV-интерполяции: ${VAR} — просто строки).
 func (e *SourceEditor) ValidateAll() error {
 	raw, err := e.Bytes()
@@ -127,6 +132,9 @@ func (e *SourceEditor) ValidateAll() error {
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
 		return fmt.Errorf("source editor: схема файла: %w", err)
+	}
+	if err := c.Validate(); err != nil {
+		return fmt.Errorf("source editor: валидация файла: %w", err)
 	}
 	return nil
 }
@@ -195,12 +203,30 @@ func applySourceEntry(n *yaml.Node, se SourceEntry) {
 		}
 		mappingSet(n, key, val)
 	}
+	setInt := func(key string, val int) {
+		if val == 0 {
+			mappingDel(n, key)
+			return
+		}
+		encoded := strconv.Itoa(val)
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value == key {
+				n.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: encoded}
+				return
+			}
+		}
+		n.Content = append(n.Content, scalar(key), &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: encoded})
+	}
 	set("name", se.Name)
 	set("type", se.Type)
 	set("dsn", se.DSN)
 	set("uri", se.URI)
+	set("ref", se.Ref)
 	set("schedule", se.Schedule)
 	set("scan_window", se.ScanWindow)
+	setInt("max_concurrent_scans", se.MaxConcurrentScans)
+	setInt("max_concurrent_tables", se.MaxConcurrentTables)
+	setInt("query_timeout_s", se.QueryTimeoutS)
 }
 
 // Validate — fail-fast проверка записи (ADR-0009/п. 12/п. 13.2).
@@ -208,29 +234,44 @@ func (se SourceEntry) Validate() error {
 	if !sourceNameRe.MatchString(se.Name) {
 		return fmt.Errorf("источник: имя %q: допустимы a-z 0-9 _ - (≤64)", se.Name)
 	}
+	addresses := 0
+	for _, value := range []string{se.DSN, se.URI, se.Ref} {
+		if value != "" {
+			addresses++
+		}
+	}
+	if addresses != 1 {
+		return fmt.Errorf("источник %q: ровно одно из полей dsn/uri/ref обязательно", se.Name)
+	}
 	switch se.Type {
 	case "clickhouse":
-		if se.DSN == "" {
-			return fmt.Errorf("источник %q: dsn обязателен для clickhouse", se.Name)
-		}
 		if se.URI != "" {
 			return fmt.Errorf("источник %q: uri неприменим к clickhouse", se.Name)
 		}
-		if err := checkSecretRef("dsn", se.DSN); err != nil {
-			return fmt.Errorf("источник %q: %w", se.Name, err)
+		if se.DSN != "" {
+			if err := checkSecretRef("dsn", se.DSN); err != nil {
+				return fmt.Errorf("источник %q: %w", se.Name, err)
+			}
 		}
 	case "mongodb":
-		if se.URI == "" {
-			return fmt.Errorf("источник %q: uri обязателен для mongodb", se.Name)
-		}
 		if se.DSN != "" {
 			return fmt.Errorf("источник %q: dsn неприменим к mongodb", se.Name)
 		}
-		if err := checkSecretRef("uri", se.URI); err != nil {
-			return fmt.Errorf("источник %q: %w", se.Name, err)
+		if se.URI != "" {
+			if err := checkSecretRef("uri", se.URI); err != nil {
+				return fmt.Errorf("источник %q: %w", se.Name, err)
+			}
 		}
 	default:
 		return fmt.Errorf("источник %q: type %q — допустимы clickhouse|mongodb", se.Name, se.Type)
+	}
+	for field, value := range map[string]int{
+		"max_concurrent_scans": se.MaxConcurrentScans, "max_concurrent_tables": se.MaxConcurrentTables,
+		"query_timeout_s": se.QueryTimeoutS,
+	} {
+		if value < 0 {
+			return fmt.Errorf("источник %q: %s должен быть >= 0", se.Name, field)
+		}
 	}
 	if se.Schedule != "" {
 		if _, err := cron.ParseStandard(se.Schedule); err != nil {
@@ -245,10 +286,15 @@ func (se SourceEntry) Validate() error {
 	return nil
 }
 
+var envRefRe = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*\}$`)
+
 // checkSecretRef — пароль в строке подключения должен быть ${ENV}-ссылкой
 // (п. 12: секреты не хранятся открытым текстом; fail-closed). Парсинг
 // вручную: net/url отклоняет ${...} в userinfo как invalid userinfo.
 func checkSecretRef(field, conn string) error {
+	if envRefRe.MatchString(conn) {
+		return nil
+	}
 	rest := conn
 	i := strings.Index(rest, "://")
 	if i < 0 {
@@ -273,7 +319,7 @@ func checkSecretRef(field, conn string) error {
 		return nil // только пользователь
 	}
 	pass := ui[colon+1:]
-	if pass != "" && !strings.Contains(pass, "${") {
+	if pass != "" && !envRefRe.MatchString(pass) {
 		return fmt.Errorf("%s: пароль в открытом виде запрещён (п. 12) — используйте ${ENV_NAME} вместо него", field)
 	}
 	return nil

@@ -55,8 +55,8 @@ func TestClusterPropagation(t *testing.T) {
 	}
 	// ListTables сортирует: backup идёт первой → её phone_backup — представитель,
 	// users/contact_phone — член кластера (п. 7.6: первый по порядку — представитель).
-	repV, ok := vs["backup/phone_backup"]
-	membV, ok2 := vs["users/contact_phone"]
+	repV, ok := vs["public.backup/phone_backup"]
+	membV, ok2 := vs["public.users/contact_phone"]
 	if !ok || !ok2 {
 		t.Fatalf("вердикты отсутствуют: %v", vs)
 	}
@@ -96,7 +96,7 @@ func TestVerdictCacheAcrossScans(t *testing.T) {
 	if rep2.CacheHits != 1 {
 		t.Fatalf("cacheHits=%d, ожидался 1: %+v", rep2.CacheHits, rep2)
 	}
-	v := vs2["backup/phone_backup"] // представитель — через него идёт кэш
+	v := vs2["public.backup/phone_backup"] // представитель — через него идёт кэш
 	ev, _ := v.Evidence["llm_cache"].(map[string]any)
 	if ev == nil || ev["hit"] != true {
 		t.Fatalf("llm_cache.hit не записан: %+v", v.Evidence)
@@ -112,7 +112,7 @@ func TestClusteringDisabledByDefault(t *testing.T) {
 	if rep.ClusterPropagated != 0 {
 		t.Fatalf("propagated без Clustering: %+v", rep)
 	}
-	if vs["users/contact_phone"].ClusterID != "" || vs["backup/phone_backup"].ClusterID != "" {
+	if vs["public.users/contact_phone"].ClusterID != "" || vs["public.backup/phone_backup"].ClusterID != "" {
 		t.Fatalf("cluster_id без Clustering должен быть пуст")
 	}
 }

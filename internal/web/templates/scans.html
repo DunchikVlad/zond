@@ -25,7 +25,15 @@
     <td>{{.Progress}}</td>
     <td>{{fmtTime .StartedAt}}</td>
     <td>{{fmtTimeP .FinishedAt}}</td>
-    <td>{{if eq .Status "running"}}<button hx-post="/scans/{{.ID}}/stop" hx-confirm="Остановить прогон?" class="danger">Стоп</button>{{end}}</td>
+    <td>
+      {{if eq .Status "running"}}<button hx-post="/scans/{{.ID}}/stop" hx-confirm="Остановить прогон?" class="danger">Стоп</button>{{end}}
+      {{if or (eq .Status "partial") (eq .Status "interrupted")}}
+      <form method="post" action="/scans/{{.ID}}/resume" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+        <button type="submit">Продолжить</button>
+      </form>
+      {{end}}
+    </td>
   </tr>
   {{end}}
 </table>

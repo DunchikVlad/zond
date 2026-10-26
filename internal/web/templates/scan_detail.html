@@ -4,6 +4,12 @@
   Статус: <span class="badge s-{{.Scan.Status}}">{{.Scan.Status}}</span> ·
   Старт: {{fmtTime .Scan.StartedAt}} · Финиш: {{fmtTimeP .Scan.FinishedAt}}
   {{if eq .Scan.Status "running"}} · <button hx-post="/scans/{{.Scan.ID}}/stop" class="danger">Остановить</button>{{end}}
+  {{if or (eq .Scan.Status "partial") (eq .Scan.Status "interrupted")}}
+  <form method="post" action="/scans/{{.Scan.ID}}/resume" style="display:inline">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button type="submit">Продолжить</button>
+  </form>
+  {{end}}
 </p>
 
 <h2>Таблицы (чекпоинты п. 13)</h2>

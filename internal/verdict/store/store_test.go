@@ -62,8 +62,16 @@ func TestSaveAndListRoundTrip(t *testing.T) {
 	st := openTest(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
-	if err := st.SaveScan(ctx, &Scan{ID: "s1", SourceName: "ch-test", Profile: "deep", Status: "running", StartedAt: now}); err != nil {
+	if err := st.SaveScan(ctx, &Scan{
+		ID: "s1", SourceName: "ch-test", Profile: "deep", Status: "running", StartedAt: now,
+		ConfigFingerprint: "cfg", TaxonomyVersion: "tax", DetectorsVersion: "det", BinaryVersion: "bin",
+	}); err != nil {
 		t.Fatalf("SaveScan: %v", err)
+	}
+	sc, err := st.GetScan(ctx, "s1")
+	if err != nil || sc.ConfigFingerprint != "cfg" || sc.TaxonomyVersion != "tax" ||
+		sc.DetectorsVersion != "det" || sc.BinaryVersion != "bin" || sc.TableIdentityVersion != TableIdentityQualified {
+		t.Fatalf("provenance round-trip: %+v, err=%v", sc, err)
 	}
 	v := testVerdict("v1", "s1")
 	if err := st.SaveVerdicts(ctx, []verdict.Verdict{v}); err != nil {

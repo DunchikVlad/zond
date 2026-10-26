@@ -27,12 +27,13 @@ import (
 
 // Коды ошибок API (blueprint п. 11.2).
 const (
-	CodeInvalidRequest    = "invalid_request"
-	CodeSourceUnavailable = "source_unavailable"
-	CodeScanNotFound      = "scan_not_found"
-	CodeReviewConflict    = "review_conflict"
-	CodeRateLimited       = "rate_limited" // п. 14: блокировка brute-force (S7г)
-	CodeInternal          = "internal"
+	CodeInvalidRequest     = "invalid_request"
+	CodeSourceUnavailable  = "source_unavailable"
+	CodeScanNotFound       = "scan_not_found"
+	CodeReviewConflict     = "review_conflict"
+	CodeResumeIncompatible = "resume_incompatible"
+	CodeRateLimited        = "rate_limited" // п. 14: блокировка brute-force (S7г)
+	CodeInternal           = "internal"
 )
 
 // Actor — автор аудит-событий до появления SSO (п. 14.2; при включённой
@@ -46,6 +47,8 @@ type ScanRunner interface {
 	// Start запускает прогон в фоне и возвращает scan_id сразу;
 	// actor — автор аудит-событий прогона (п. 14.2).
 	Start(source, profile, actor string) (string, error)
+	// Resume продолжает partial/interrupted прогон после сверки provenance.
+	Resume(scanID, actor string) (string, error)
 	// Stop мягко останавливает прогон (ctx-отмена; статус interrupted).
 	Stop(scanID string) error
 }
@@ -116,6 +119,7 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /api/v1/scans", s.requireAction(auth.ActionView, s.handleScanList))
 	mux.HandleFunc("GET /api/v1/scans/{id}", s.requireAction(auth.ActionView, s.handleScanGet))
 	mux.HandleFunc("POST /api/v1/scans/{id}/stop", s.requireAction(auth.ActionScan, s.handleScanStop))
+	mux.HandleFunc("POST /api/v1/scans/{id}/resume", s.requireAction(auth.ActionScan, s.handleScanResume))
 
 	mux.HandleFunc("GET /api/v1/verdicts", s.requireAction(auth.ActionView, s.handleVerdictList))
 	mux.HandleFunc("GET /api/v1/verdicts/{id}", s.requireAction(auth.ActionView, s.handleVerdictGet))

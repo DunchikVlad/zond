@@ -169,8 +169,8 @@ func TestBudgetExceededStopsLLM(t *testing.T) {
 	if llm.verifyCalls != 0 {
 		t.Fatalf("верификатор вызван %d раз при превышенном бюджете", llm.verifyCalls)
 	}
-	first := vs["users/phone_a"] // обрабатывается первой → вызов успел сделаться
-	second := vs["users/phone_b"]
+	first := vs["public.users/phone_a"] // обрабатывается первой → вызов успел сделаться
+	second := vs["public.users/phone_b"]
 	if first.Evidence["budget_exceeded"] == true {
 		t.Fatalf("первая колонка до бюджета, пометки быть не должно: %+v", first.Evidence)
 	}
@@ -211,8 +211,8 @@ func TestBudgetNotExceededBelowLimit(t *testing.T) {
 	if llm.classifyCalls != 2 || llm.verifyCalls != 2 {
 		t.Fatalf("classify=%d verify=%d, ожидалось 2/2 (бюджет не исчерпан)", llm.classifyCalls, llm.verifyCalls)
 	}
-	if vs["users/phone_b"].Evidence["budget_exceeded"] != nil {
-		t.Fatalf("budget_exceeded без причины: %+v", vs["users/phone_b"].Evidence)
+	if vs["public.users/phone_b"].Evidence["budget_exceeded"] != nil {
+		t.Fatalf("budget_exceeded без причины: %+v", vs["public.users/phone_b"].Evidence)
 	}
 	calls, _ := st.ListAgentCalls(t.Context(), rep.ScanID)
 	if len(calls) != 4 {
@@ -244,7 +244,7 @@ func TestLLMErrorRecorded(t *testing.T) {
 	if rep.LLMCalls != 0 || rep.CostUSD != 0 {
 		t.Fatalf("ошибки не должны давать вызовы/стоимость: %+v", rep)
 	}
-	v := vs["users/phone_a"]
+	v := vs["public.users/phone_a"]
 	if v.ReviewStatus != verdict.StatusPending || v.EvidenceLayer == verdict.LayerLLM {
 		t.Fatalf("вердикт без LLM-кандидата: %+v", v)
 	}
@@ -255,7 +255,7 @@ func TestLLMErrorRecorded(t *testing.T) {
 	if len(calls) != 4 {
 		t.Fatalf("записей ошибок %d, ожидалось 4: %+v", len(calls), calls)
 	}
-	verdictIDs := map[string]bool{v.ID: true, vs["users/phone_b"].ID: true}
+	verdictIDs := map[string]bool{v.ID: true, vs["public.users/phone_b"].ID: true}
 	for _, c := range calls {
 		if c.Status != "error" || c.Cached {
 			t.Fatalf("запись ошибки искажена: %+v", c)
@@ -293,7 +293,7 @@ func TestAgentCallsCommitPerTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListAgentCalls: %v", err)
 	}
-	backupVerdict := vs["backup/phone_backup"].ID
+	backupVerdict := vs["public.backup/phone_backup"].ID
 	if len(calls) != 2 {
 		t.Fatalf("записей %d, ожидалось 2 (classify + verify backup): %+v", len(calls), calls)
 	}

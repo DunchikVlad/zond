@@ -24,11 +24,21 @@ import (
 // Тесты веб-UI (инкремент 5г, п. 11.3): рендер страниц, auth/RBAC,
 // действия ревью, CSP, отсутствие сырых значений в evidence.
 
-type fakeRunner struct{ started, stopped string }
+type fakeRunner struct {
+	started, stopped, resumed string
+	resumeErr                 error
+}
 
 func (f *fakeRunner) Start(source, profile, actor string) (string, error) {
 	f.started = source
 	return "scan-1", nil
+}
+func (f *fakeRunner) Resume(scanID, actor string) (string, error) {
+	if f.resumeErr != nil {
+		return "", f.resumeErr
+	}
+	f.resumed = scanID
+	return "scan-resumed", nil
 }
 func (f *fakeRunner) Stop(scanID string) error { f.stopped = scanID; return nil }
 

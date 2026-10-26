@@ -272,6 +272,12 @@ func runScan(args []string) int {
 		prof = b.Detectors.Scan.Profile
 	}
 	cfg := engineConfig(b)
+	cfg.BinaryVersion = Version
+	cfg.ConfigFingerprint, err = config.ScanFingerprint(b, src, prof, *useLLM)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scan: fingerprint конфигурации: %v\n", err)
+		return 2
+	}
 	// Circuit breaker (п. 13.2): в CLI экземпляр на процесс — срабатывание
 	// внутри прогона корректно; в serve шарится между прогонами (runner).
 	cfg.Breaker = scanengine.NewBreaker()
@@ -288,6 +294,10 @@ func runScan(args []string) int {
 		}
 		if prev == nil {
 			fmt.Fprintf(os.Stderr, "scan: -resume: нет partial/interrupted прогона для источника %q\n", src.Name)
+			return 2
+		}
+		if err := scanengine.ValidateResume(prev, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "scan: -resume: %v\n", err)
 			return 2
 		}
 		cfg.ResumeFrom = prev.ID
@@ -492,22 +502,11 @@ type engineRunner struct {
 	useLLM   bool
 	resolver secrets.Resolver // ref-источников (Vault, ADR-0012); nil — режим ENV
 	breaker  *scanengine.Breaker
-	connsFn  func() *config.Connections // S8-7: горячий провайдер (UI-правка); nil — статика
-	bundleFn func() *config.Bundle      // S8-8: горячие детекторы (ADR-0014); nil — статика
+	bundleFn func() *config.Bundle // S8-7/S8-8: горячий снимок конфигурации; nil — статика
 
 	mu       sync.Mutex
 	running  map[string]context.CancelFunc // scan_id → cancel
 	srcSlots map[string]chan struct{}      // source → семафор max_concurrent_scans (п. 13.2)
-}
-
-// conns — текущие connections (горячие при UI-правке, иначе из cfg).
-func (r *engineRunner) conns() *config.Connections {
-	if r.connsFn != nil {
-		if c := r.connsFn(); c != nil {
-			return c
-		}
-	}
-	return r.b.Connections
 }
 
 // bundle — текущий bundle (S8-8: детекторы перечитываются без рестарта;
@@ -535,22 +534,53 @@ func newEngineRunner(b *config.Bundle, st *store.Store, log *slog.Logger, useLLM
 // клиент получает осмысленную ошибку, а не «прогон умер в фоне».
 // actor — автор аудит-событий прогона (п. 14.2: sso:<subject>/token:<id>/api).
 func (r *engineRunner) Start(source, profile, actor string) (string, error) {
-	src, err := findSource(r.conns(), source)
+	return r.start(source, profile, actor, nil)
+}
+
+// Resume продолжает конкретный partial/interrupted прогон с его профилем.
+func (r *engineRunner) Resume(scanID, actor string) (string, error) {
+	prev, err := r.st.GetScan(context.Background(), scanID)
+	if err != nil {
+		return "", err
+	}
+	if prev.Status != "partial" && prev.Status != "interrupted" {
+		return "", &api.ScanConflictError{Reason: "продолжить можно только partial/interrupted прогон"}
+	}
+	return r.start(prev.SourceName, prev.Profile, actor, prev)
+}
+
+func (r *engineRunner) start(source, profile, actor string, prev *store.Scan) (string, error) {
+	b := r.bundle()
+	src, err := findSource(b.Connections, source)
 	if err != nil {
 		return "", &api.BadScanRequestError{Reason: err.Error()}
 	}
-	// Circuit breaker (п. 13.2): источник на паузе — отказ до подключения.
 	if perr := r.breaker.PausedErr(source, time.Now()); perr != nil {
 		return "", &api.SourceUnavailableError{Reason: perr.Error()}
 	}
 	if profile == "" {
-		profile = r.bundle().Detectors.Scan.Profile
+		profile = b.Detectors.Scan.Profile
+	}
+	cfg := engineConfig(b)
+	cfg.Actor = actor
+	cfg.Breaker = r.breaker
+	cfg.MaxTables = src.TablesLimit()
+	cfg.QueryTimeout = src.QueryTimeout()
+	cfg.BinaryVersion = Version
+	cfg.ConfigFingerprint, err = config.ScanFingerprint(b, src, profile, r.useLLM)
+	if err != nil {
+		return "", fmt.Errorf("fingerprint конфигурации: %w", err)
+	}
+	if prev != nil {
+		if err := scanengine.ValidateResume(prev, cfg); err != nil {
+			return "", err
+		}
+		cfg.ResumeFrom = prev.ID
 	}
 	factory, ok := connector.Lookup(src.Type)
 	if !ok {
 		return "", &api.BadScanRequestError{Reason: fmt.Sprintf("коннектор %q не зарегистрирован", src.Type)}
 	}
-	// Resolve ref (Vault) от имени инициатора: факт — в аудит (п. 14.2).
 	dsnCtx := context.WithValue(context.Background(), auditActorKey{}, actor)
 	dsn, err := resolveSourceDSN(dsnCtx, src, r.resolver)
 	if err != nil {
@@ -569,11 +599,10 @@ func (r *engineRunner) Start(source, profile, actor string) (string, error) {
 		return "", &api.SourceUnavailableError{Reason: fmt.Sprintf("источник %q: %v", source, err)}
 	}
 
-	// LLM-слой собирается fail-fast до регистрации прогона (как `scan -llm`).
 	var llm scanengine.LLMClassifier
 	var llmID scanengine.LLMIdentity
 	if r.useLLM {
-		llm, llmID, err = buildLLMComposite(r.bundle(), taxonomyLabels(r.b.Taxonomy))
+		llm, llmID, err = buildLLMComposite(b, taxonomyLabels(b.Taxonomy))
 		if err != nil {
 			conn.Close()
 			return "", &api.SourceUnavailableError{Reason: fmt.Sprintf("llm-слой: %v", err)}
@@ -583,8 +612,6 @@ func (r *engineRunner) Start(source, profile, actor string) (string, error) {
 	scanID := newAPIScanID()
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
-	// max_concurrent_scans источника (п. 13.2, S8-2): семафор процесса
-	// (default 1); слот занят активным прогоном до его завершения.
 	slots, ok := r.srcSlots[source]
 	if !ok {
 		slots = make(chan struct{}, src.ScansLimit())
@@ -607,18 +634,11 @@ func (r *engineRunner) Start(source, profile, actor string) (string, error) {
 		defer func() {
 			r.mu.Lock()
 			delete(r.running, scanID)
-			<-slots // освобождение слота max_concurrent_scans (п. 13.2)
+			<-slots
 			r.mu.Unlock()
 			conn.Close()
 		}()
-		cfg := engineConfig(r.bundle())
-		cfg.Actor = actor // п. 14.2: прогон аудируется от имени инициатора
-		cfg.Breaker = r.breaker
-		// Лимиты источника (п. 13.2, S8-2): таблицы параллельно до
-		// max_concurrent_tables, дедлайн запроса к БД — query_timeout_s.
-		cfg.MaxTables = src.TablesLimit()
-		cfg.QueryTimeout = src.QueryTimeout()
-		eng := scanengine.New(r.st, meta.New(r.b.Taxonomy.Synonyms), cfg)
+		eng := scanengine.New(r.st, meta.New(b.Taxonomy.Synonyms), cfg)
 		if llm != nil {
 			eng.SetLLM(llm, llmID)
 		}
@@ -696,7 +716,7 @@ func runServe(args []string) int {
 	applyConns := func(config.SourceEntry) (*config.Connections, error) {
 		c, err := config.LoadConnections(connsPath)
 		if err != nil {
-			return nil, err // файл записан, но не применён (например, новый ENV) — вступит после рестарта
+			return nil, err // atomic swap ещё не выполнен; /sources откатит файл
 		}
 		nb := *bundleHot.Load()
 		nb.Connections = c
@@ -739,8 +759,7 @@ func runServe(args []string) int {
 			"refs", len(b.Connections.Vault.Secrets))
 	}
 	runner := newEngineRunner(b, st, log, *useLLM, resolver)
-	runner.connsFn = func() *config.Connections { return bundleHot.Load().Connections } // S8-7/S8-8: горячий список источников
-	runner.bundleFn = bundleHot.Load                                                    // S8-8: горячие детекторы
+	runner.bundleFn = bundleHot.Load // S8-7/S8-8: горячие источники и детекторы
 	// Аутентификация (инкремент 5в, п. 11.3/п. 14.2): включается sso.enabled
 	// в connections.yaml; admin-token fallback — env CLASSIFIER_ADMIN_TOKEN
 	// при admin_token_fallback=true (bootstrap/аварийный доступ).

@@ -74,23 +74,35 @@ func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 // scans / scan_tables — чекпоинты прогона (blueprint п. 13)
 // ---------------------------------------------------------------------------
 
+const TableIdentityQualified = 2
+
 // Scan — строка прогона сканирования.
 type Scan struct {
-	ID         string
-	SourceName string
-	Profile    string
-	Status     string // running|partial|done|interrupted|failed|budget_exceeded
-	StartedAt  time.Time
-	FinishedAt *time.Time
-	StatsJSON  string
+	ID                   string
+	SourceName           string
+	Profile              string
+	Status               string // running|partial|done|interrupted|failed|budget_exceeded
+	StartedAt            time.Time
+	FinishedAt           *time.Time
+	StatsJSON            string
+	TableIdentityVersion int
+	ConfigFingerprint    string
+	TaxonomyVersion      string
+	DetectorsVersion     string
+	BinaryVersion        string
 }
 
 // SaveScan создаёт прогон.
 func (s *Store) SaveScan(ctx context.Context, sc *Scan) error {
+	if sc.TableIdentityVersion == 0 {
+		sc.TableIdentityVersion = TableIdentityQualified
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO scans (id, source_name, profile, status, started_at, stats_json)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		sc.ID, sc.SourceName, sc.Profile, sc.Status, sc.StartedAt.UTC().Format(time.RFC3339), sc.StatsJSON)
+		`INSERT INTO scans (id, source_name, profile, status, started_at, stats_json,
+			table_identity_version, config_fingerprint, taxonomy_version, detectors_version, binary_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sc.ID, sc.SourceName, sc.Profile, sc.Status, sc.StartedAt.UTC().Format(time.RFC3339), sc.StatsJSON,
+		sc.TableIdentityVersion, sc.ConfigFingerprint, sc.TaxonomyVersion, sc.DetectorsVersion, sc.BinaryVersion)
 	return err
 }
 
@@ -144,23 +156,17 @@ func (s *Store) DoneTables(ctx context.Context, scanID string) (map[string]bool,
 // interrupted (мягкая остановка, п. 11.2). Нет такого — (nil, nil).
 func (s *Store) LastCheckpointScan(ctx context.Context, source string) (*Scan, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, source_name, profile, status, started_at, stats_json
+		`SELECT `+scanSelectColumns+`
 		 FROM scans
 		 WHERE source_name = ? AND status IN ('partial', 'interrupted')
 		 ORDER BY started_at DESC LIMIT 1`, source)
-	var sc Scan
-	var started string
-	if err := row.Scan(&sc.ID, &sc.SourceName, &sc.Profile, &sc.Status, &started, &sc.StatsJSON); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, err
+	sc, err := scanScanRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	t, err := time.Parse(time.RFC3339, started)
 	if err != nil {
 		return nil, err
 	}
-	sc.StartedAt = t
 	return &sc, nil
 }
 

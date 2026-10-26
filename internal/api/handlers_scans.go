@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/DunchikVlad/zond/internal/audit"
+	"github.com/DunchikVlad/zond/internal/scanengine"
 	"github.com/DunchikVlad/zond/internal/verdict/store"
 )
 
@@ -145,6 +146,47 @@ func (s *Server) handleScanStart(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"scan_id": scanID, "status": "running"})
 }
 
+// handleScanResume — POST /api/v1/scans/{id}/resume: новый прогон,
+// пропускающий done-таблицы после fail-closed сверки provenance.
+func (s *Server) handleScanResume(w http.ResponseWriter, r *http.Request) {
+	if s.runner == nil {
+		writeError(w, http.StatusNotImplemented, CodeInvalidRequest,
+			"продолжение сканов недоступно: сервер без runner", nil)
+		return
+	}
+	id := r.PathValue("id")
+	newID, err := s.runner.Resume(id, s.actorFromCtx(r))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, CodeScanNotFound, "прогон не найден", map[string]string{"scan_id": id})
+		return
+	}
+	var compat *scanengine.ResumeCompatibilityError
+	if errors.As(err, &compat) {
+		writeError(w, http.StatusConflict, CodeResumeIncompatible, err.Error(), map[string]any{"mismatches": compat.Mismatches})
+		return
+	}
+	var conflict *ScanConflictError
+	if errors.As(err, &conflict) {
+		writeError(w, http.StatusConflict, CodeInvalidRequest, err.Error(), nil)
+		return
+	}
+	var unavailable *SourceUnavailableError
+	if errors.As(err, &unavailable) {
+		writeError(w, http.StatusBadGateway, CodeSourceUnavailable, err.Error(), nil)
+		return
+	}
+	var bad *BadScanRequestError
+	if errors.As(err, &bad) {
+		writeError(w, http.StatusBadRequest, CodeInvalidRequest, err.Error(), nil)
+		return
+	}
+	if err != nil {
+		s.internalError(w, r, "продолжение прогона", err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"scan_id": newID, "status": "running", "resume_from": id})
+}
+
 // handleScanStop — POST /api/v1/scans/{id}/stop: мягкая остановка (п. 11.2).
 // Аудируется как scan/scan_stop (п. 14.2); движок фиксирует interrupted.
 func (s *Server) handleScanStop(w http.ResponseWriter, r *http.Request) {
@@ -191,6 +233,11 @@ func (e *SourceUnavailableError) Error() string { return e.Reason }
 type BadScanRequestError struct{ Reason string }
 
 func (e *BadScanRequestError) Error() string { return e.Reason }
+
+// ScanConflictError — состояние прогона не допускает запрошенную операцию.
+type ScanConflictError struct{ Reason string }
+
+func (e *ScanConflictError) Error() string { return e.Reason }
 
 // internalError — 500 с логом (code internal, п. 11.2).
 func (s *Server) internalError(w http.ResponseWriter, r *http.Request, op string, err error) {

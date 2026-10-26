@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DunchikVlad/zond/internal/audit"
@@ -43,6 +44,7 @@ var staticFS embed.FS
 // api.ScanRunner; serve передаёт engineRunner).
 type ScanRunner interface {
 	Start(source, profile, actor string) (string, error)
+	Resume(scanID, actor string) (string, error)
 	Stop(scanID string) error
 }
 
@@ -65,6 +67,7 @@ type Server struct {
 	conns      func() *config.Connections
 	connsPath  string
 	applyConns func(entry config.SourceEntry) (*config.Connections, error)
+	sourceMu   sync.Mutex
 
 	// Инкремент S8-8 (ADR-0014): горячая перезагрузка detectors.yaml через
 	// /settings: bundle — текущий bundle; detectorsPath — редактируемый файл;
@@ -87,9 +90,9 @@ func WithConnsPath(path string) Option {
 	return func(s *Server) { s.connsPath = path }
 }
 
-// WithApplyConns — колбэк «сохранить запись и применить»: serve пишет файл
-// через SourceEditor, перечитывает конфиг, меняет atomic-провайдер и
-// перестраивает расписания scheduler'а.
+// WithApplyConns — перечитать уже записанный файл, сменить atomic-провайдер
+// и перестроить расписания scheduler'а. Ошибка означает, что новое состояние
+// не применено; /sources откатывает файл. Повторный вызов восстанавливает runtime.
 func WithApplyConns(fn func(entry config.SourceEntry) (*config.Connections, error)) Option {
 	return func(s *Server) { s.applyConns = fn }
 }
@@ -172,6 +175,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /scans", s.handleScans)
 	mux.HandleFunc("POST /scans/start", s.requireRole(auth.ActionScan, s.handleScanStart))
 	mux.HandleFunc("POST /scans/{id}/stop", s.requireRole(auth.ActionScan, s.handleScanStop))
+	mux.HandleFunc("POST /scans/{id}/resume", s.requireRole(auth.ActionScan, s.handleScanResume))
 	mux.HandleFunc("GET /scans/{id}", s.handleScanDetail)
 	mux.HandleFunc("GET /verdicts", s.handleVerdicts)
 	mux.HandleFunc("GET /review", s.handleReview)
@@ -408,6 +412,20 @@ func (s *Server) handleScanStart(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/scans/"+scanID, http.StatusFound)
 }
 
+func (s *Server) handleScanResume(w http.ResponseWriter, r *http.Request) {
+	if s.runner == nil {
+		s.renderError(w, http.StatusNotImplemented, "продолжение недоступно")
+		return
+	}
+	id := r.PathValue("id")
+	newID, err := s.runner.Resume(id, s.subject(r).Actor)
+	if err != nil {
+		s.renderError(w, http.StatusConflict, "продолжение: "+err.Error())
+		return
+	}
+	http.Redirect(w, r, "/scans/"+newID, http.StatusFound)
+}
+
 func (s *Server) handleScanStop(w http.ResponseWriter, r *http.Request) {
 	if s.runner == nil {
 		s.renderError(w, http.StatusNotImplemented, "остановка недоступна")
@@ -439,7 +457,7 @@ func (s *Server) handleScanDetail(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, "scan_detail.html", map[string]any{
 		"Subject": s.subject(r), "Title": "Прогон " + id, "Scan": sc,
 		"Tables": tables, "Summary": sum, "Cost": cost, "Errors": failed,
-		"Runner": s.runner != nil,
+		"Runner": s.runner != nil, "CSRF": s.csrfToken(r),
 	})
 }
 
