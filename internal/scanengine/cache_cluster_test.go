@@ -5,6 +5,7 @@ import (
 
 	"github.com/DunchikVlad/zond/internal/agentproxy"
 	"github.com/DunchikVlad/zond/internal/connector"
+	"github.com/DunchikVlad/zond/internal/verdict"
 )
 
 // grayPhoneSource — две таблицы с колонками ОДИНАКОВЫХ значений
@@ -68,6 +69,12 @@ func TestClusterPropagation(t *testing.T) {
 	}
 	if membV.Evidence["cluster_propagated"] != true {
 		t.Fatalf("cluster_propagated не записан: %+v", membV.Evidence)
+	}
+	if membV.LLMStatus != verdict.LLMStatusClusterPropagated { // S9-2
+		t.Fatalf("член кластера: llm_status=%q, ожидался cluster_propagated", membV.LLMStatus)
+	}
+	if repV.LLMStatus != verdict.LLMStatusCalled { // S9-2: представитель классифицирован через LLM
+		t.Fatalf("представитель: llm_status=%q, ожидался called", repV.LLMStatus)
 	}
 	if repV.Evidence["cluster_propagated"] != nil {
 		t.Fatalf("представитель не должен иметь cluster_propagated: %+v", repV.Evidence)

@@ -123,6 +123,7 @@ func (s *Server) routes() {
 
 	mux.HandleFunc("GET /api/v1/verdicts", s.requireAction(auth.ActionView, s.handleVerdictList))
 	mux.HandleFunc("GET /api/v1/verdicts/{id}", s.requireAction(auth.ActionView, s.handleVerdictGet))
+	mux.HandleFunc("GET /api/v1/verdicts/{id}/agent-calls", s.requireAction(auth.ActionView, s.handleVerdictAgentCalls)) // S9-2
 	mux.HandleFunc("POST /api/v1/verdicts/{id}/review", s.requireAction(auth.ActionReview, s.handleReview))
 
 	mux.HandleFunc("GET /api/v1/drift", s.requireAction(auth.ActionView, s.handleDrift))

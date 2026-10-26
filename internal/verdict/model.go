@@ -39,6 +39,23 @@ const (
 	StatusRelabelled   ReviewStatus = "relabelled"
 )
 
+// LLMStatus — состояние LLM-обработки колонки (S9-2, blueprint S9 п. 3):
+// фиксирует, что именно произошло на слое 2 каскада — вызов, попадание в кэш,
+// отказ по бюджету/сэмплу, распространение от представителя кластера или
+// ошибка агента. Пустая строка (строки до миграции 0011) трактуется как
+// «неизвестно» и не отфильтровывается ни одним статусом.
+type LLMStatus string
+
+const (
+	LLMStatusNotCalled         LLMStatus = "not_called"
+	LLMStatusCalled            LLMStatus = "called"
+	LLMStatusCacheHit          LLMStatus = "cache_hit"
+	LLMStatusSmallSample       LLMStatus = "small_sample"
+	LLMStatusClusterPropagated LLMStatus = "cluster_propagated"
+	LLMStatusBudgetExceeded    LLMStatus = "budget_exceeded"
+	LLMStatusError             LLMStatus = "error"
+)
+
 // Verdict — атомарный результат классификации одной колонки/пути
 // (blueprint п. 5.4). Evidence содержит только маскированные примеры (ADR-0010).
 type Verdict struct {
@@ -57,6 +74,7 @@ type Verdict struct {
 	PromptVersion    string
 	SampleSize       int
 	ClusterID        string
+	LLMStatus        LLMStatus // S9-2: состояние LLM-обработки колонки
 	ReviewStatus     ReviewStatus
 	FinalLabel       Label
 	ReviewedBy       string

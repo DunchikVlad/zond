@@ -778,6 +778,7 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 		observe.Default.IncrClusterPropagated() // п. 17
 		e.finalizeVerdict(&v, pool, evRules)
 		v.Evidence["cluster_propagated"] = true
+		v.LLMStatus = verdict.LLMStatusClusterPropagated // S9-2
 		return v
 	}
 
@@ -800,18 +801,11 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 				v.Evidence = map[string]any{}
 			}
 			v.Evidence["budget_exceeded"] = true
+			v.LLMStatus = verdict.LLMStatusBudgetExceeded // S9-2
 		} else {
 			if res := e.llmClassify(ctx, col, pool, maskedVals, &v, ts); res != nil {
 				cands = append(cands, ensemble.Candidate{Label: verdict.Label(res.Label), Confidence: res.Confidence, Layer: verdict.LayerLLM})
 				out = ensemble.Decide(cands, e.cfg.TauAccept, weights, gray)
-				// объяснение модели — в evidence (S8-6): раньше reason_ru
-				// жил только в agent_calls, в вердикте терялся.
-				if v.Evidence == nil {
-					v.Evidence = map[string]any{}
-				}
-				v.Evidence["llm"] = map[string]any{
-					"reason_ru": res.ReasonRU, "agent": e.llmID.AgentID, "model": e.llmID.Model,
-				}
 			}
 			// эскалация в верификатор, если решение всё ещё в серой зоне (п. 7 правило 4)
 			if out.Escalate && !e.budgetHit() {
@@ -824,6 +818,11 @@ func (e *Engine) verdict(ctx context.Context, scanID string, t connector.TableRe
 	v.EvidenceLayer = out.Layer
 	v.ReviewStatus = out.ReviewStatus
 	e.finalizeVerdict(&v, pool, evRules)
+	if v.LLMStatus == "" {
+		// S9-2: слой 2 не срабатывал (уверенный rules/meta, маленький сэмпл
+		// уже помечен в finalizeVerdict) — фиксируем «вызова не было».
+		v.LLMStatus = verdict.LLMStatusNotCalled
+	}
 	if v.ClusterID != "" {
 		// вердикт представителя — источник для распространения (п. 7.6)
 		e.cluMu.Lock()
@@ -859,6 +858,7 @@ func (e *Engine) finalizeVerdict(v *verdict.Verdict, pool *sampler.Pool, evRules
 		v.Label = verdict.Label("UNKNOWN")
 		v.ReviewStatus = verdict.StatusPending
 		v.Evidence["reason"] = "small_sample"
+		v.LLMStatus = verdict.LLMStatusSmallSample // S9-2
 	}
 }
 
@@ -901,10 +901,14 @@ func maskedForFingerprint(values []string) []string {
 }
 
 // cachedLLMVerdict — JSON-представление ответа классификатора в кэше (п. 10.5).
-// Только лейбл/уверенность/версия промпта — без значений (ADR-0010).
+// Только лейбл/уверенность/объяснение/версия промпта — без значений (ADR-0010).
+// S9-2: reason_ru и sensitivity добавлены позже; старые записи декодируются
+// с пустыми полями (допустимо — объяснение кэшем просто не сохранялось).
 type cachedLLMVerdict struct {
 	Label         string  `json:"label"`
 	Confidence    float64 `json:"confidence"`
+	Sensitivity   string  `json:"sensitivity"`
+	ReasonRU      string  `json:"reason_ru"`
 	PromptVersion string  `json:"prompt_version"`
 }
 
@@ -913,6 +917,9 @@ type cachedLLMVerdict struct {
 // вердикт без сетевого обращения. Каждое обращение (вызов, ошибка, попадание
 // в кэш) порождает запись agent_calls (п. 10.6) в буфер таблицы ts,
 // коммит — с вердиктами (п. 13). Возвращает nil при ошибке вызова.
+// S9-2: evidence["llm"] и llm_status вердикта заполняются здесь же — и для
+// вызова, и для попадания в кэш (полный per-column evidence, идентичный
+// обоим путям).
 func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sampler.Pool, maskedVals []string, v *verdict.Verdict, ts *tableState) *agentproxy.ClassifyResult {
 	cacheKey := ""
 	if e.cfg.CacheScope != "" {
@@ -922,14 +929,24 @@ func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sa
 				e.statsMu.Lock()
 				e.stats.cacheHits++
 				e.statsMu.Unlock()
+				v.PromptVersion = cached.PromptVersion // S9-2: дефект hit-ветки
+				v.LLMStatus = verdict.LLMStatusCacheHit
 				setLLMCacheEvidence(v, cv.AgentID, true)
 				// попадание в кэш — тоже учётная запись (cached=1, метрика
 				// доли кэша п. 17); сетевого вызова и токенов нет
 				e.recordCall(v, ts, store.AgentCall{
-					PromptVersion: cached.PromptVersion,
-					Status:        "cache_hit",
-					Cached:        true,
+					Operation:         store.CallOpClassify,
+					PromptVersion:     cached.PromptVersion,
+					Status:            "cache_hit",
+					Cached:            true,
+					AnswerLabel:       cached.Label,
+					AnswerConfidence:  cached.Confidence,
+					AnswerSensitivity: cached.Sensitivity,
+					ReasonRU:          cached.ReasonRU,
 				})
+				// evidence["llm"] при попадании эквивалентен промаху (S9-2):
+				// ответ кэширован, объяснение и экономика — из записи кэша.
+				e.setLLMEvidence(v, cached, 0, 0, 0, 0)
 				return cached
 			}
 		}
@@ -941,8 +958,15 @@ func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sa
 		e.statsMu.Lock()
 		e.stats.llmErrors++
 		e.statsMu.Unlock()
+		v.LLMStatus = verdict.LLMStatusError // S9-2
+		msg := "empty response"
+		if err != nil {
+			msg = err.Error()
+		}
 		e.recordCall(v, ts, store.AgentCall{
+			Operation:     store.CallOpClassify,
 			PromptVersion: prompts.Version, LatencyMS: int64(measured / time.Millisecond), Status: "error",
+			Error: truncErr(msg),
 		})
 		return nil
 	}
@@ -950,20 +974,32 @@ func (e *Engine) llmClassify(ctx context.Context, col connector.Column, pool *sa
 	e.stats.llmCalls++
 	e.statsMu.Unlock()
 	v.PromptVersion = res.PromptVersion
+	v.LLMStatus = verdict.LLMStatusCalled // S9-2
 	latency := res.Latency
 	if latency <= 0 {
 		latency = measured // fake-реализации latency не отдают — меряем сами
 	}
+	cost := e.callCost(ctx, res.Usage.TokensIn, res.Usage.TokensOut)
+	latencyMS := int64(latency / time.Millisecond)
 	e.recordCall(v, ts, store.AgentCall{
+		Operation:     store.CallOpClassify,
 		PromptVersion: res.PromptVersion,
 		TokensIn:      res.Usage.TokensIn, TokensOut: res.Usage.TokensOut,
-		CostUSD:   e.callCost(ctx, res.Usage.TokensIn, res.Usage.TokensOut),
-		LatencyMS: int64(latency / time.Millisecond),
-		Status:    "ok",
+		CostUSD:           cost,
+		LatencyMS:         latencyMS,
+		Status:            "ok",
+		AnswerLabel:       res.Label,
+		AnswerConfidence:  res.Confidence,
+		AnswerSensitivity: res.Sensitivity,
+		ReasonRU:          res.ReasonRU,
 	})
+	// объяснение модели и экономика вызова — в evidence (S8-6, S9-2):
+	// раньше reason_ru жил только в agent_calls, в вердикте терялся.
+	e.setLLMEvidence(v, res, res.Usage.TokensIn, res.Usage.TokensOut, cost, latencyMS)
 	if cacheKey != "" {
 		if b, mErr := json.Marshal(cachedLLMVerdict{
-			Label: res.Label, Confidence: res.Confidence, PromptVersion: res.PromptVersion,
+			Label: res.Label, Confidence: res.Confidence, Sensitivity: res.Sensitivity,
+			ReasonRU: res.ReasonRU, PromptVersion: res.PromptVersion,
 		}); mErr == nil {
 			now := e.nowFn()
 			_ = e.st.CachePut(ctx, cacheKey, store.CachedVerdict{
@@ -989,8 +1025,14 @@ func (e *Engine) verifyGray(ctx context.Context, col connector.Column, pool *sam
 		e.statsMu.Lock()
 		e.stats.llmErrors++
 		e.statsMu.Unlock()
+		msg := "empty response"
+		if err != nil {
+			msg = err.Error()
+		}
 		e.recordCall(v, ts, store.AgentCall{
+			Operation:     store.CallOpVerify,
 			PromptVersion: prompts.Version, LatencyMS: int64(measured / time.Millisecond), Status: "error",
+			Error: truncErr(msg),
 		})
 		return
 	}
@@ -998,19 +1040,28 @@ func (e *Engine) verifyGray(ctx context.Context, col connector.Column, pool *sam
 	if latency <= 0 {
 		latency = measured
 	}
+	cost := e.callCost(ctx, vr.Usage.TokensIn, vr.Usage.TokensOut)
+	latencyMS := int64(latency / time.Millisecond)
 	e.recordCall(v, ts, store.AgentCall{
+		Operation:     store.CallOpVerify,
 		PromptVersion: prompts.Version,
 		TokensIn:      vr.Usage.TokensIn, TokensOut: vr.Usage.TokensOut,
-		CostUSD:   e.callCost(ctx, vr.Usage.TokensIn, vr.Usage.TokensOut),
-		LatencyMS: int64(latency / time.Millisecond),
-		Status:    "ok",
+		CostUSD:          cost,
+		LatencyMS:        latencyMS,
+		Status:           "ok",
+		AnswerLabel:      vr.Label,
+		AnswerConfidence: vr.Confidence,
+		ReasonRU:         vr.ReasonRU,
 	})
-	// объяснение верификатора — в evidence (S8-6).
+	// объяснение верификателя и экономика вызова — в evidence (S8-6, S9-2).
 	if v.Evidence == nil {
 		v.Evidence = map[string]any{}
 	}
 	v.Evidence["llm_verify"] = map[string]any{
 		"verdict": vr.Verdict, "label": vr.Label, "confidence": vr.Confidence, "reason_ru": vr.ReasonRU,
+		"agent": e.llmID.AgentID, "model": e.llmID.Model, "prompt_version": prompts.Version,
+		"tokens_in": vr.Usage.TokensIn, "tokens_out": vr.Usage.TokensOut,
+		"cost_usd": cost, "latency_ms": latencyMS,
 	}
 	*out = ensemble.ApplyVerifier(*out, ensemble.VerifierOutcome{
 		Verdict: vr.Verdict, Label: verdict.Label(vr.Label), Confidence: vr.Confidence,
@@ -1041,6 +1092,7 @@ func (e *Engine) recordCall(v *verdict.Verdict, ts *tableState, call store.Agent
 		Details: map[string]any{
 			"call_id": call.ID, "scan_id": call.ScanID, "verdict_id": call.VerdictID,
 			"model": call.Model, "prompt_version": call.PromptVersion,
+			"operation": call.Operation, "answer_label": call.AnswerLabel, // S9-2
 			"status": call.Status, "cached": call.Cached,
 			"tokens_in": call.TokensIn, "tokens_out": call.TokensOut,
 			"cost_usd": call.CostUSD, "latency_ms": call.LatencyMS,
@@ -1132,13 +1184,40 @@ func setLLMCacheEvidence(v *verdict.Verdict, agentID string, hit bool) {
 	v.Evidence["llm_cache"] = map[string]any{"hit": hit, "agent_id": agentID}
 }
 
+// setLLMEvidence — S9-2: полный per-column evidence ответа классификатора
+// (объяснение, ответ агента, экономика вызова). При попадании в кэш
+// токены/стоимость/латентность нулевые — сетевого вызова не было.
+func (e *Engine) setLLMEvidence(v *verdict.Verdict, res *agentproxy.ClassifyResult, tokensIn, tokensOut int, cost float64, latencyMS int64) {
+	if v.Evidence == nil {
+		v.Evidence = map[string]any{}
+	}
+	v.Evidence["llm"] = map[string]any{
+		"label": res.Label, "confidence": res.Confidence, "sensitivity": res.Sensitivity,
+		"reason_ru": res.ReasonRU, "prompt_version": res.PromptVersion,
+		"tokens_in": tokensIn, "tokens_out": tokensOut,
+		"cost_usd": cost, "latency_ms": latencyMS,
+		"agent": e.llmID.AgentID, "model": e.llmID.Model,
+	}
+}
+
+// truncErr — обрезка текста ошибки вызова до 300 символов (S9-2): длинные
+// стектрейсы в учётной записи не нужны, а место в таблице занимают.
+func truncErr(s string) string {
+	r := []rune(s)
+	if len(r) <= 300 {
+		return s
+	}
+	return string(r[:300]) + "…"
+}
+
 func decodeCachedVerdict(s string) (*agentproxy.ClassifyResult, error) {
 	var cv cachedLLMVerdict
 	if err := json.Unmarshal([]byte(s), &cv); err != nil {
 		return nil, err
 	}
 	return &agentproxy.ClassifyResult{
-		Label: cv.Label, Confidence: cv.Confidence, PromptVersion: cv.PromptVersion,
+		Label: cv.Label, Confidence: cv.Confidence, Sensitivity: cv.Sensitivity,
+		ReasonRU: cv.ReasonRU, PromptVersion: cv.PromptVersion,
 	}, nil
 }
 

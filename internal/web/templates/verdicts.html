@@ -21,6 +21,16 @@
     <option value="rejected" {{if eq .Filter.ReviewStatus "rejected"}}selected{{end}}>rejected</option>
     <option value="relabelled" {{if eq .Filter.ReviewStatus "relabelled"}}selected{{end}}>relabelled</option>
   </select>
+  <select name="llm_status">
+    <option value="">LLM: любой статус</option>
+    <option value="not_called" {{if eq .Filter.LLMStatus "not_called"}}selected{{end}}>not_called</option>
+    <option value="called" {{if eq .Filter.LLMStatus "called"}}selected{{end}}>called</option>
+    <option value="cache_hit" {{if eq .Filter.LLMStatus "cache_hit"}}selected{{end}}>cache_hit</option>
+    <option value="small_sample" {{if eq .Filter.LLMStatus "small_sample"}}selected{{end}}>small_sample</option>
+    <option value="cluster_propagated" {{if eq .Filter.LLMStatus "cluster_propagated"}}selected{{end}}>cluster_propagated</option>
+    <option value="budget_exceeded" {{if eq .Filter.LLMStatus "budget_exceeded"}}selected{{end}}>budget_exceeded</option>
+    <option value="error" {{if eq .Filter.LLMStatus "error"}}selected{{end}}>error</option>
+  </select>
   <input name="min_conf" placeholder="min_conf" size="6" value="{{if .Filter.MinConf}}{{conf .Filter.MinConf}}{{end}}">
   <input name="cluster_id" placeholder="cluster_id" value="{{.Filter.ClusterID}}">
   <button type="submit">Фильтр</button>
@@ -29,7 +39,7 @@
 <p>Всего под фильтром: {{.Total}} · страница {{.Page}} из {{.Pages}}</p>
 <div id="vtable">
 <table>
-  <tr><th>Таблица</th><th>Путь</th><th>Лейбл</th><th>Чувствит.</th><th>Conf</th><th>Слой</th><th>Статус ревью</th><th>Евиденс</th></tr>
+  <tr><th>Таблица</th><th>Путь</th><th>Лейбл</th><th>Чувствит.</th><th>Conf</th><th>Слой</th><th>Статус ревью</th><th>LLM</th><th>Евиденс</th></tr>
   {{range .Verdicts}}
   <tr>
     <td>{{.Table}}</td><td>{{.Path}}</td>
@@ -39,9 +49,11 @@
     <td>{{.ReviewStatus}}
       {{if eq .ReviewStatus "pending"}} <a href="/review">→ ревью</a>{{end}}
     </td>
+    <td>{{.LLMStatus}}</td>
     <td><details><summary>сэмпл · правила · LLM</summary>
       {{range evlines .}}<div class="ev">{{.}}</div>{{end}}
-    </details></td>
+    </details>
+    <details><summary>вызовы LLM</summary><div class="calls" hx-get="/verdicts/{{.ID}}/calls" hx-trigger="click once" hx-target="next .calls"></div></details></td>
   </tr>
   {{end}}
 </table>

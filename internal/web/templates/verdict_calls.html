@@ -1,0 +1,15 @@
+{{/* S9-2: фрагмент вызовов LLM вердикта — подгружается HTMX в div.calls.
+     Экранирование — html/template (safeHTML не используется, п. 14). */}}
+{{if .Calls}}
+{{range .Calls}}
+<div class="call">
+  <div><b>{{.Operation}}</b> · {{.Status}}{{if .Cached}} (кэш){{end}} · {{.AgentID}}/{{.Model}}{{if .PromptVersion}} · промпт v{{.PromptVersion}}{{end}}</div>
+  <div>{{.TokensIn}}/{{.TokensOut}} токенов · {{usd .CostUSD}} · {{.LatencyMS}} мс</div>
+  {{if .AnswerLabel}}<div>ответ: {{.AnswerLabel}} (conf {{conf .AnswerConfidence}}{{if .AnswerSensitivity}}, {{.AnswerSensitivity}}{{end}})</div>{{end}}
+  {{if .ReasonRU}}<div>объяснение: {{.ReasonRU}}</div>{{end}}
+  {{if .Error}}<div class="error">ошибка: {{.Error}}</div>{{end}}
+</div>
+{{end}}
+{{else}}
+<div class="call">вызовов LLM не было</div>
+{{end}}

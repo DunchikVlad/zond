@@ -178,6 +178,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /scans/{id}/resume", s.requireRole(auth.ActionScan, s.handleScanResume))
 	mux.HandleFunc("GET /scans/{id}", s.handleScanDetail)
 	mux.HandleFunc("GET /verdicts", s.handleVerdicts)
+	mux.HandleFunc("GET /verdicts/{id}/calls", s.handleVerdictCalls) // S9-2: фрагмент вызовов LLM
 	mux.HandleFunc("GET /review", s.handleReview)
 	mux.HandleFunc("POST /review/{id}/action", s.requireRole(auth.ActionReview, s.handleReviewAction))
 	mux.HandleFunc("POST /review/bulk", s.requireRole(auth.ActionReview, s.handleReviewBulk))
@@ -461,6 +462,18 @@ func (s *Server) handleScanDetail(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// knownLLMStatus — мягкая валидация фильтра llm_status (S9-2): неизвестное
+// значение игнорируется (сторона store отфильтрует известное как есть).
+func knownLLMStatus(s string) bool {
+	switch verdict.LLMStatus(s) {
+	case verdict.LLMStatusNotCalled, verdict.LLMStatusCalled, verdict.LLMStatusCacheHit,
+		verdict.LLMStatusSmallSample, verdict.LLMStatusClusterPropagated,
+		verdict.LLMStatusBudgetExceeded, verdict.LLMStatusError:
+		return true
+	}
+	return false
+}
+
 func (s *Server) handleVerdicts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	f := store.VerdictFilter{
@@ -473,6 +486,9 @@ func (s *Server) handleVerdicts(w http.ResponseWriter, r *http.Request) {
 		RiskFirst:    r.URL.Query().Get("sort") != "scan",
 		Limit:        50,
 		Offset:       pageOffset(r.URL.Query().Get("page")),
+	}
+	if ls := r.URL.Query().Get("llm_status"); knownLLMStatus(ls) { // S9-2
+		f.LLMStatus = ls
 	}
 	if mc := r.URL.Query().Get("min_conf"); mc != "" {
 		f.MinConf, _ = strconv.ParseFloat(mc, 64)
@@ -487,6 +503,22 @@ func (s *Server) handleVerdicts(w http.ResponseWriter, r *http.Request) {
 		"Filter": f, "Page": f.Offset/50 + 1, "Pages": (total + 49) / 50,
 		"Labels": s.taxonomyLabels(),
 	})
+}
+
+// handleVerdictCalls — GET /verdicts/{id}/calls: фрагмент со списком вызовов
+// LLM вердикта (S9-2, HTMX: подгружается один раз по раскрытию деталей).
+func (s *Server) handleVerdictCalls(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := s.st.GetVerdict(r.Context(), id); err != nil {
+		s.renderError(w, http.StatusNotFound, "вердикт "+id+" не найден")
+		return
+	}
+	calls, err := s.st.ListAgentCallsByVerdict(r.Context(), id)
+	if err != nil {
+		s.renderError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.render(w, http.StatusOK, "verdict_calls.html", map[string]any{"Calls": calls})
 }
 
 func pageOffset(page string) int {
@@ -532,15 +564,33 @@ func evidenceLines(v verdict.Verdict) []string {
 	}
 	if lc, ok := v.Evidence["llm_cache"].(map[string]any); ok {
 		if lc["hit"] == true {
-			add("кэш LLM", "вердикт из кэша (п. 10.5); объяснение кэшем не сохраняется")
+			add("кэш LLM", "вердикт из кэша (п. 10.5); объяснение — из записи кэша (S9-2)")
 		}
 	}
 	if llm, ok := v.Evidence["llm"].(map[string]any); ok {
-		add("LLM", fmt.Sprintf("%v: %v", llm["model"], llm["reason_ru"]))
+		// S9-2: ответ агента и экономика вызова — полный per-column evidence.
+		line := fmt.Sprintf("%v: %v", llm["model"], llm["label"])
+		if c, ok := llm["confidence"].(float64); ok {
+			line += fmt.Sprintf(" (conf %.2f", c)
+			if s, ok := llm["sensitivity"].(string); ok && s != "" {
+				line += ", " + s
+			}
+			line += ")"
+		}
+		if r, ok := llm["reason_ru"].(string); ok && r != "" {
+			line += ": " + r
+		}
+		line += llmEconomy(llm)
+		add("LLM", line)
 	}
 	if lv, ok := v.Evidence["llm_verify"].(map[string]any); ok {
-		add("верификатор", fmt.Sprintf("%v %v (conf %v): %v",
-			lv["verdict"], lv["label"], lv["confidence"], lv["reason_ru"]))
+		// S9-2: верификатор — с идентичностью агента и экономикой вызова.
+		line := fmt.Sprintf("%v %v (conf %v): %v", lv["verdict"], lv["label"], lv["confidence"], lv["reason_ru"])
+		if m, ok := lv["model"].(string); ok && m != "" {
+			line += fmt.Sprintf(" · %v/%v, промпт v%v", lv["agent"], m, lv["prompt_version"])
+		}
+		line += llmEconomy(lv)
+		add("верификатор", line)
 	}
 	if sample, ok := v.Evidence["sample"].(map[string]any); ok {
 		line := fmt.Sprintf("значений %v, null %v из %v",
@@ -584,6 +634,30 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// llmEconomy — хвост строки evidence с экономикой вызова (S9-2):
+// «· N/M токенов, $X, латентность Y мс, промпт vZ»; пустые/нулевые поля
+// (кэш-записи, ошибки) пропускаются.
+func llmEconomy(m map[string]any) string {
+	var parts []string
+	if ti, ok := m["tokens_in"].(float64); ok && ti > 0 {
+		to, _ := m["tokens_out"].(float64)
+		parts = append(parts, fmt.Sprintf("%.0f/%.0f токенов", ti, to))
+	}
+	if c, ok := m["cost_usd"].(float64); ok && c > 0 {
+		parts = append(parts, fmt.Sprintf("$%.4f", c))
+	}
+	if l, ok := m["latency_ms"].(float64); ok && l > 0 {
+		parts = append(parts, fmt.Sprintf("латентность %.0f мс", l))
+	}
+	if p, ok := m["prompt_version"].(string); ok && p != "" {
+		parts = append(parts, "промпт v"+p)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " · " + strings.Join(parts, ", ")
 }
 
 func (s *Server) handleReview(w http.ResponseWriter, r *http.Request) {

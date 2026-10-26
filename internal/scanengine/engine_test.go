@@ -352,6 +352,9 @@ func TestNullHeavyColumnIsSmallSample(t *testing.T) {
 	if v.Evidence["reason"] != "small_sample" {
 		t.Fatalf("reason small_sample не записан: %+v", v.Evidence)
 	}
+	if v.LLMStatus != verdict.LLMStatusSmallSample { // S9-2
+		t.Fatalf("llm_status=%q, ожидался small_sample: %+v", v.LLMStatus, v)
+	}
 }
 
 func stringInAnyMap(m map[string]any, s string) bool {

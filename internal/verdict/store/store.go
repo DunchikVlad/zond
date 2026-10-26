@@ -179,7 +179,7 @@ func (s *Store) ListVerdicts(ctx context.Context, scanID string) ([]verdict.Verd
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, scan_id, table_name, path, native_type, label, sensitivity, confidence,
 		       evidence_layer, evidence, taxonomy_version, detectors_version, prompt_version,
-		       sample_size, cluster_id, review_status, final_label, reviewed_by, reviewed_at, created_at
+		       sample_size, cluster_id, llm_status, review_status, final_label, reviewed_by, reviewed_at, created_at
 		FROM verdicts WHERE scan_id = ? ORDER BY table_name, path`, scanID)
 	if err != nil {
 		return nil, err
@@ -205,7 +205,7 @@ func scanVerdict(r rowScanner) (verdict.Verdict, error) {
 	var ev, createdAt, reviewedAt string
 	err := r.Scan(&v.ID, &v.ScanID, &v.Table, &v.Path, &v.NativeType, &v.Label, &v.Sensitivity,
 		&v.Confidence, &v.EvidenceLayer, &ev, &v.TaxonomyVersion, &v.DetectorsVersion,
-		&v.PromptVersion, &v.SampleSize, &v.ClusterID, &v.ReviewStatus, &v.FinalLabel,
+		&v.PromptVersion, &v.SampleSize, &v.ClusterID, &v.LLMStatus, &v.ReviewStatus, &v.FinalLabel,
 		&v.ReviewedBy, &reviewedAt, &createdAt)
 	if err != nil {
 		return v, err

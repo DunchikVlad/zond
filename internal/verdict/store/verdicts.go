@@ -26,7 +26,8 @@ type VerdictFilter struct {
 	ReviewStatus string
 	Table        string // подстрока имени таблицы (поиск UI)
 	ClusterID    string
-	RiskFirst    bool // сортировка «риск первыми»: PCI/PII × confidence desc
+	LLMStatus    string // S9-2: not_called|called|cache_hit|small_sample|cluster_propagated|budget_exceeded|error
+	RiskFirst    bool   // сортировка «риск первыми»: PCI/PII × confidence desc
 	Limit        int
 	Offset       int
 }
@@ -65,6 +66,10 @@ func (s *Store) ListVerdictsFiltered(ctx context.Context, f VerdictFilter) ([]ve
 		cond = append(cond, "cluster_id = ?")
 		args = append(args, f.ClusterID)
 	}
+	if f.LLMStatus != "" {
+		cond = append(cond, "llm_status = ?")
+		args = append(args, f.LLMStatus)
+	}
 	where := ""
 	if len(cond) > 0 {
 		where = " WHERE " + strings.Join(cond, " AND ")
@@ -84,7 +89,7 @@ func (s *Store) ListVerdictsFiltered(ctx context.Context, f VerdictFilter) ([]ve
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, scan_id, table_name, path, native_type, label, sensitivity, confidence,
 		       evidence_layer, evidence, taxonomy_version, detectors_version, prompt_version,
-		       sample_size, cluster_id, review_status, final_label, reviewed_by, reviewed_at, created_at
+		       sample_size, cluster_id, llm_status, review_status, final_label, reviewed_by, reviewed_at, created_at
 		FROM verdicts`+where+order+` LIMIT ? OFFSET ?`, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, err
@@ -106,7 +111,7 @@ func (s *Store) GetVerdict(ctx context.Context, id string) (*verdict.Verdict, er
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, scan_id, table_name, path, native_type, label, sensitivity, confidence,
 		       evidence_layer, evidence, taxonomy_version, detectors_version, prompt_version,
-		       sample_size, cluster_id, review_status, final_label, reviewed_by, reviewed_at, created_at
+		       sample_size, cluster_id, llm_status, review_status, final_label, reviewed_by, reviewed_at, created_at
 		FROM verdicts WHERE id = ?`, id)
 	v, err := scanVerdict(row)
 	if err != nil {
@@ -176,7 +181,7 @@ func (s *Store) ApplyReview(ctx context.Context, verdictID string, action Review
 	row := tx.QueryRowContext(ctx, `
 		SELECT id, scan_id, table_name, path, native_type, label, sensitivity, confidence,
 		       evidence_layer, evidence, taxonomy_version, detectors_version, prompt_version,
-		       sample_size, cluster_id, review_status, final_label, reviewed_by, reviewed_at, created_at
+		       sample_size, cluster_id, llm_status, review_status, final_label, reviewed_by, reviewed_at, created_at
 		FROM verdicts WHERE id = ?`, verdictID)
 	v, err := scanVerdict(row)
 	if err != nil {

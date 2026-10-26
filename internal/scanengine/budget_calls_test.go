@@ -180,6 +180,12 @@ func TestBudgetExceededStopsLLM(t *testing.T) {
 	if second.Evidence["budget_exceeded"] != true {
 		t.Fatalf("в evidence второй колонки должен быть budget_exceeded: %+v", second.Evidence)
 	}
+	if first.LLMStatus != verdict.LLMStatusCalled {
+		t.Fatalf("первая колонка: llm_status=%q, ожидался called", first.LLMStatus)
+	}
+	if second.LLMStatus != verdict.LLMStatusBudgetExceeded {
+		t.Fatalf("вторая колонка: llm_status=%q, ожидался budget_exceeded", second.LLMStatus)
+	}
 	if !nearlyEq(rep.CostUSD, 0.15) {
 		t.Fatalf("CostUSD=%v, ожидался 0.15", rep.CostUSD)
 	}
@@ -247,6 +253,9 @@ func TestLLMErrorRecorded(t *testing.T) {
 	v := vs["public.users/phone_a"]
 	if v.ReviewStatus != verdict.StatusPending || v.EvidenceLayer == verdict.LayerLLM {
 		t.Fatalf("вердикт без LLM-кандидата: %+v", v)
+	}
+	if v.LLMStatus != verdict.LLMStatusError { // S9-2
+		t.Fatalf("llm_status=%q, ожидался error: %+v", v.LLMStatus, v)
 	}
 	calls, err := st.ListAgentCalls(t.Context(), rep.ScanID)
 	if err != nil {

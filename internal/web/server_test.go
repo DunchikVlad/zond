@@ -395,7 +395,8 @@ func TestReviewBulkAndAuditPage(t *testing.T) {
 }
 
 // TestEvidenceLinesS86 — человекочитаемый рендер evidence (S8-6): правила
-// recognizer'ов, примеры сэмпла, объяснения LLM/верификатора.
+// recognizer'ов, примеры сэмпла, объяснения LLM/верификатора. S9-2: строки
+// LLM дополнены ответом агента и экономикой вызова.
 func TestEvidenceLinesS86(t *testing.T) {
 	v := verdict.Verdict{
 		Label: "EMAIL", EvidenceLayer: "rules", Confidence: 0.99,
@@ -406,8 +407,14 @@ func TestEvidenceLinesS86(t *testing.T) {
 				"rules/email": map[string]any{"matched": 20, "total": 20, "checksum": false},
 				"rules/inn":   map[string]any{"matched": 2, "total": 20, "checksum": true},
 			},
-			"llm":        map[string]any{"model": "kimi-k2.6", "reason_ru": "маскированные email"},
-			"llm_verify": map[string]any{"verdict": "confirm", "label": "EMAIL", "confidence": 0.85, "reason_ru": "остатки совпадают"},
+			"llm": map[string]any{"model": "kimi-k2.6", "label": "EMAIL", "confidence": 0.9,
+				"sensitivity": "PII", "reason_ru": "маскированные email",
+				"tokens_in": 1000.0, "tokens_out": 100.0, "cost_usd": 0.0002, "latency_ms": 350.0,
+				"prompt_version": "1"},
+			"llm_verify": map[string]any{"verdict": "confirm", "label": "EMAIL", "confidence": 0.85,
+				"reason_ru": "остатки совпадают", "agent": "zond-main", "model": "kimi-k2.6",
+				"prompt_version": "1", "tokens_in": 500.0, "tokens_out": 50.0,
+				"cost_usd": 0.0001, "latency_ms": 200.0},
 		},
 	}
 	lines := evidenceLines(v)
@@ -417,8 +424,10 @@ func TestEvidenceLinesS86(t *testing.T) {
 		`"iv***@ex***.com"`,
 		"rules/email 20/20",
 		"rules/inn 2/20 (checksum)",
-		"LLM: kimi-k2.6: маскированные email",
+		"LLM: kimi-k2.6: EMAIL (conf 0.90, PII): маскированные email",
+		"1000/100 токенов, $0.0002, латентность 350 мс, промпт v1",
 		"верификатор: confirm EMAIL (conf 0.85): остатки совпадают",
+		"· zond-main/kimi-k2.6, промпт v1",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("нет строки %q в:\n%s", want, joined)

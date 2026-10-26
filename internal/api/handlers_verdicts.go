@@ -37,6 +37,7 @@ type verdictDTO struct {
 	PromptVersion    string                `json:"prompt_version,omitempty"`
 	SampleSize       int                   `json:"sample_size"`
 	ClusterID        string                `json:"cluster_id,omitempty"`
+	LLMStatus        string                `json:"llm_status,omitempty"` // S9-2
 	ReviewStatus     verdict.ReviewStatus  `json:"review_status"`
 	ReviewedBy       string                `json:"reviewed_by,omitempty"`
 	ReviewedAt       *time.Time            `json:"reviewed_at,omitempty"`
@@ -51,7 +52,7 @@ func toVerdictDTO(v *verdict.Verdict) verdictDTO {
 		EvidenceLayer: v.EvidenceLayer, Evidence: v.Evidence,
 		TaxonomyVersion: v.TaxonomyVersion, DetectorsVersion: v.DetectorsVersion,
 		PromptVersion: v.PromptVersion, SampleSize: v.SampleSize,
-		ClusterID: v.ClusterID, ReviewStatus: v.ReviewStatus,
+		ClusterID: v.ClusterID, LLMStatus: string(v.LLMStatus), ReviewStatus: v.ReviewStatus,
 		ReviewedBy: v.ReviewedBy, CreatedAt: v.CreatedAt,
 	}
 	if !v.ReviewedAt.IsZero() {
@@ -64,8 +65,19 @@ func toVerdictDTO(v *verdict.Verdict) verdictDTO {
 	return dto
 }
 
+// validLLMStatuses — допустимые значения фильтра llm_status (S9-2).
+var validLLMStatuses = map[string]bool{
+	string(verdict.LLMStatusNotCalled):         true,
+	string(verdict.LLMStatusCalled):            true,
+	string(verdict.LLMStatusCacheHit):          true,
+	string(verdict.LLMStatusSmallSample):       true,
+	string(verdict.LLMStatusClusterPropagated): true,
+	string(verdict.LLMStatusBudgetExceeded):    true,
+	string(verdict.LLMStatusError):             true,
+}
+
 // handleVerdictList — GET /api/v1/verdicts?scan_id=&label=&sensitivity=
-// &min_conf=&review_status=&table=&cluster_id=&sort=risk_first&limit=&offset=
+// &min_conf=&review_status=&table=&cluster_id=&llm_status=&sort=risk_first&limit=&offset=
 func (s *Server) handleVerdictList(w http.ResponseWriter, r *http.Request) {
 	limit, offset, err := pageParams(r)
 	if err != nil {
@@ -88,6 +100,14 @@ func (s *Server) handleVerdictList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.MinConf = c
+	}
+	if v := q.Get("llm_status"); v != "" { // S9-2: фильтр статуса LLM
+		if !validLLMStatuses[v] {
+			writeError(w, http.StatusBadRequest, CodeInvalidRequest,
+				"llm_status: неизвестный статус", map[string]any{"llm_status": v})
+			return
+		}
+		f.LLMStatus = v
 	}
 	vs, total, err := s.st.ListVerdictsFiltered(r.Context(), f)
 	if err != nil {
@@ -127,6 +147,65 @@ func (s *Server) handleVerdictGet(w http.ResponseWriter, r *http.Request) {
 		"verdict":       toVerdictDTO(v),
 		"review_events": events,
 	})
+}
+
+// agentCallDTO — учётная запись вызова в API (S9-2: операция, ответ агента,
+// объяснение, ошибка — полный per-column evidence).
+type agentCallDTO struct {
+	ID                string    `json:"id"`
+	VerdictID         string    `json:"verdict_id"`
+	Operation         string    `json:"operation"`
+	AgentID           string    `json:"agent_id"`
+	Model             string    `json:"model"`
+	PromptVersion     string    `json:"prompt_version"`
+	TokensIn          int       `json:"tokens_in"`
+	TokensOut         int       `json:"tokens_out"`
+	CostUSD           float64   `json:"cost_usd"`
+	LatencyMS         int64     `json:"latency_ms"`
+	Cached            bool      `json:"cached"`
+	Status            string    `json:"status"`
+	AnswerLabel       string    `json:"answer_label"`
+	AnswerConfidence  float64   `json:"answer_confidence"`
+	AnswerSensitivity string    `json:"answer_sensitivity"`
+	ReasonRU          string    `json:"reason_ru"`
+	Error             string    `json:"error"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+func toAgentCallDTO(c *store.AgentCall) agentCallDTO {
+	return agentCallDTO{
+		ID: c.ID, VerdictID: c.VerdictID, Operation: c.Operation,
+		AgentID: c.AgentID, Model: c.Model, PromptVersion: c.PromptVersion,
+		TokensIn: c.TokensIn, TokensOut: c.TokensOut, CostUSD: c.CostUSD,
+		LatencyMS: c.LatencyMS, Cached: c.Cached, Status: c.Status,
+		AnswerLabel: c.AnswerLabel, AnswerConfidence: c.AnswerConfidence,
+		AnswerSensitivity: c.AnswerSensitivity, ReasonRU: c.ReasonRU,
+		Error: c.Error, CreatedAt: c.CreatedAt,
+	}
+}
+
+// handleVerdictAgentCalls — GET /api/v1/verdicts/{id}/agent-calls: учётные
+// записи LLM-вызовов вердикта (S9-2), хронологический порядок.
+func (s *Server) handleVerdictAgentCalls(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := s.st.GetVerdict(r.Context(), id); errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "verdict_not_found", "вердикт не найден",
+			map[string]string{"verdict_id": id})
+		return
+	} else if err != nil {
+		s.internalError(w, r, "карточка вердикта", err)
+		return
+	}
+	calls, err := s.st.ListAgentCallsByVerdict(r.Context(), id)
+	if err != nil {
+		s.internalError(w, r, "вызовы вердикта", err)
+		return
+	}
+	items := make([]agentCallDTO, 0, len(calls))
+	for i := range calls {
+		items = append(items, toAgentCallDTO(&calls[i]))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 // reviewRequest — тело POST /api/v1/verdicts/{id}/review (п. 11.2).
