@@ -61,6 +61,7 @@ func (s *Server) handleSources(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, "sources.html", map[string]any{
 		"Subject": s.subject(r), "Title": "Источники",
 		"Sources": entries, "CSRF": s.csrfToken(r), "Msg": r.URL.Query().Get("msg"),
+		"Types": connector.Types(), // S9-5: динамический список типов
 	})
 }
 

@@ -15,8 +15,9 @@
     <td><input type="hidden" name="csrf_token" value="{{$.CSRF}}">
         <input name="name" value="{{.Name}}" size="14" {{if .Name}}readonly{{end}}></td>
     <td><select name="type">
-      <option value="clickhouse" {{if eq .Type "clickhouse"}}selected{{end}}>clickhouse</option>
-      <option value="mongodb" {{if eq .Type "mongodb"}}selected{{end}}>mongodb</option>
+      {{range $.Types}}
+      <option value="{{.}}" {{if eq $.Type .}}selected{{end}}>{{.}}</option>
+      {{end}}
     </select></td>
     <td><input name="dsn" value="{{.DSN}}" size="28" placeholder="clickhouse://user:${ENV}@host:9000/db">
         <input name="uri" value="{{.URI}}" size="28" placeholder="mongodb://user:${ENV}@host:27017/db">
@@ -46,8 +47,9 @@
   <input type="hidden" name="csrf_token" value="{{.CSRF}}">
   <input name="name" placeholder="имя (a-z 0-9 _ -)" required>
   <select name="type">
-    <option value="clickhouse">clickhouse</option>
-    <option value="mongodb">mongodb</option>
+    {{range .Types}}
+    <option value="{{.}}">{{.}}</option>
+    {{end}}
   </select>
   <input name="dsn" placeholder="clickhouse://user:${ENV}@host:9000/db" size="34">
   <input name="uri" placeholder="mongodb://user:${ENV}@host:27017/db" size="34">

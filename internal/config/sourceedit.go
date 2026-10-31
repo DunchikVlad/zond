@@ -7,15 +7,17 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/DunchikVlad/zond/internal/connector"
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 )
 
 // SourceEntry — редактируемое представление записи источника для UI (S8-7).
 // DSN/URI хранятся как в файле — с ${ENV}-литералами (п. 12).
+// Type — из connector.Types() (S9-5: динамический список, не hardcoded).
 type SourceEntry struct {
 	Name                string `yaml:"name"`
-	Type                string `yaml:"type"` // clickhouse | mongodb
+	Type                string `yaml:"type"` // clickhouse | mongodb | postgresql | ...
 	DSN                 string `yaml:"dsn,omitempty"`
 	URI                 string `yaml:"uri,omitempty"`
 	Ref                 string `yaml:"ref,omitempty"`
@@ -262,8 +264,17 @@ func (se SourceEntry) Validate() error {
 				return fmt.Errorf("источник %q: %w", se.Name, err)
 			}
 		}
+	case "postgresql":
+		if se.URI != "" {
+			return fmt.Errorf("источник %q: uri неприменим к postgresql (используйте dsn)", se.Name)
+		}
+		if se.DSN != "" {
+			if err := checkSecretRef("dsn", se.DSN); err != nil {
+				return fmt.Errorf("источник %q: %w", se.Name, err)
+			}
+		}
 	default:
-		return fmt.Errorf("источник %q: type %q — допустимы clickhouse|mongodb", se.Name, se.Type)
+		return fmt.Errorf("источник %q: type %q — допустимы %s", se.Name, se.Type, strings.Join(connector.Types(), "|"))
 	}
 	for field, value := range map[string]int{
 		"max_concurrent_scans": se.MaxConcurrentScans, "max_concurrent_tables": se.MaxConcurrentTables,

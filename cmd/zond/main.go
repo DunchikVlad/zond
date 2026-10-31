@@ -33,6 +33,7 @@ import (
 	"github.com/DunchikVlad/zond/internal/connector"
 	_ "github.com/DunchikVlad/zond/internal/connector/clickhouse" // регистрация по конвенции путей
 	_ "github.com/DunchikVlad/zond/internal/connector/mongodb"    // регистрация по конвенции путей
+	_ "github.com/DunchikVlad/zond/internal/connector/postgres"   // регистрация по конвенции путей (S9-5)
 	"github.com/DunchikVlad/zond/internal/doctor"
 	"github.com/DunchikVlad/zond/internal/logging"
 	"github.com/DunchikVlad/zond/internal/observe"
