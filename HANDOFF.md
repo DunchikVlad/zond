@@ -79,8 +79,38 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
-Снимок от 2026-10-26 ~20:55 UTC (сессия S9-3; код `bd49d0a`,
+Снимок от 2026-10-31 ~12:00 UTC (сессия S9-4; код — этот коммит,
 документация этим «-док» коммитом):
+
+- **S9-4 завершён**: DescriptionRunner — отдельный агентский прогон описания
+  БД по scan_id (без повторного подключения к источнику). Миграция 0013:
+  `description_runs` (id, scan_id FK, status, prompt_version/hash, agent_id,
+  model, tokens, cost_usd, latency_ms, result_json, error, timestamps).
+  Статусы running/done/failed/interrupted; partial-скан — с пометкой
+  PARTIAL_SCAN во входе LLM. Агрегированный вход: только лейблы/типы/
+  sensitivity/confidence, без сырых значений и имён инфраструктуры (ADR
+  изоляции). Промпт `prompts.DescriptionVersion="1"`, строгая JSON-схема
+  (purpose_ru, table_groups, data_categories, sensitivity_zones, risks,
+  ambiguities, review_recommendations). `agentproxy.Describe` — новый метод
+  поверх того же транспорта (OpenAI-compat), валидация схемы, ретраи.
+  `scanengine.DescriptionRunner` — оркестратор: агрегация вердиктов,
+  вызов LLM, фиксация статуса/экономики/аудита (description_start/finish/
+  failed, actor, без текста результата в аудите). Стоимость по прайс-листу
+  model_prices. API: `POST /api/v1/scans/{id}/description-runs` (ActionScan,
+  409 если не терминальный), `GET /api/v1/scans/{id}/description-runs`
+  (история), `GET /api/v1/description-runs/{id}` (карточка). Web: кнопка
+  «Описание БД» на /scans/{id} (терминальные статусы), таблица истории
+  с раскрытием результата. Подключение в serve: при -llm и непустом
+  реестре agents. Подробности: `docs/progress/2026-10-31-stage-9-4-description.md`.
+- Проверки: исходный и финальный `make ci`, `go test -race` (scanengine,
+  api, store, audit) — зелёные. Миграции up/down/up покрыты. Живой стенд
+  не запускался (LLM — fake в тестах).
+- **Следующий шаг S9-5**: выбор СУБД и новые коннекторы (PostgreSQL →
+  MySQL/MariaDB → MS SQL). Список типов из connector.Types(), capability-
+  метаданные, единая валидация type/DSN/URI/ref.
+- Открытое: Kimi живой прогон ждёт пополнения баланса; fake-LLM eval
+  $0,117/1000 выше цели $0,10. CI Fuzz/coverage gate не добавлены (PAT без
+  `workflow`), LICENSE/NOTICE отсутствуют; flaky race audit не проявился.
 
 - **S9-3 завершён**: пользовательский промпт на скан. Prompt-контракт
   blueprint (п. 5.3 пользовательская инструкция, п. 10.5 хэш в ключе кэша,
