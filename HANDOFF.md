@@ -79,7 +79,32 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
-Снимок от 2026-10-31 ~12:00 UTC (сессия S9-4; код — этот коммит,
+Снимок от 2026-10-31 ~14:00 UTC (сессия S9-5; код — этот коммит,
+документация этим «-док» коммитом):
+
+- **S9-5 завершён**: выбор СУБД и новый коннектор PostgreSQL.
+  - `internal/connector/postgres/`: коннектор PostgreSQL (lib/pq, pure Go):
+    Ping, ListTables (information_schema), GetSchema (unwrap типов),
+    CountRows, Sample (ORDER BY random()), классификация ошибок (pq коды
+    53300/53400/57P01/57P02/57P03/58030 + сетевые) → retryable/overload.
+    Регистрация в init() как "postgresql".
+  - Динамический список типов: `connector.Types()` вместо hardcoded
+    clickhouse|mongodb в UI (`/sources` select) и валидации (`sourceedit.go`).
+    Единая проверка type/DSN/URI/ref: postgresql — dsn (uri неприменим).
+  - Тесты: contract_test (testcontainers postgres:16-alpine, пропуск без
+    Docker), errors_test (7 кейсов классификации).
+  - Подробности: `docs/progress/2026-10-31-stage-9-5-postgres.md`.
+- Проверки: исходный и финальный `make ci`, `go test -race` (connector,
+  config, web) — зелёные. Контрактные тесты PostgreSQL скипнуты без Docker
+  (testcontainers), unit-тесты зелёные.
+- **Следующий шаг S9-6**: оставшиеся продуктовые доработки (quick/deep/custom
+  семантика, редактирование реестра агентов, API rate-limit, async-экспорт,
+  UX-улучшения).
+- Открытое: Kimi живой прогон ждёт пополнения баланса; fake-LLM eval
+  $0,117/1000 выше цели $0,10. CI Fuzz/coverage gate не добавлены (PAT без
+  `workflow`), LICENSE/NOTICE отсутствуют; flaky race audit не проявился.
+
+Снимок от 2026-10-31 ~12:00 UTC (сессия S9-4; код `3b88f54`,
 документация этим «-док» коммитом):
 
 - **S9-4 завершён**: DescriptionRunner — отдельный агентский прогон описания
