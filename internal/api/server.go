@@ -56,16 +56,23 @@ type ScanRunner interface {
 	Stop(scanID string) error
 }
 
+// DescriptionRunner — запуск агентского прогона описания БД (S9-4).
+// Реализация — scanengine.DescriptionRunner; в тестах — fake.
+type DescriptionRunner interface {
+	Run(ctx context.Context, scanID, actor string) (*store.DescriptionRun, error)
+}
+
 // Server — HTTP-сервер REST API v1.
 type Server struct {
-	st      *store.Store
-	log     *slog.Logger
-	runner  ScanRunner // nil → POST /scans и stop → 501
-	nowFn   func() time.Time
-	maxRows int          // export_max_rows (п. 11.2, default 50 000)
-	auth    *AuthConfig  // nil/Disabled → режим 5б (без аутентификации)
-	saml    http.Handler // SSO-эндпоинты (5в-5); nil → SSO не поднят
-	mux     *http.ServeMux
+	st         *store.Store
+	log        *slog.Logger
+	runner     ScanRunner        // nil → POST /scans и stop → 501
+	descRunner DescriptionRunner // nil → описание недоступно
+	nowFn      func() time.Time
+	maxRows    int          // export_max_rows (п. 11.2, default 50 000)
+	auth       *AuthConfig  // nil/Disabled → режим 5б (без аутентификации)
+	saml       http.Handler // SSO-эндпоинты (5в-5); nil → SSO не поднят
+	mux        *http.ServeMux
 }
 
 // Option — настройка сервера.
@@ -73,6 +80,9 @@ type Option func(*Server)
 
 // WithRunner подключает запуск сканов (serve-режим).
 func WithRunner(r ScanRunner) Option { return func(s *Server) { s.runner = r } }
+
+// WithDescriptionRunner подключает генерацию описания БД (S9-4).
+func WithDescriptionRunner(r DescriptionRunner) Option { return func(s *Server) { s.descRunner = r } }
 
 // WithAuth включает аутентификацию/авторизацию (инкремент 5в, п. 11.3):
 // SSO-сессии, API-токены, admin-token fallback, RBAC, аудит отказов.
@@ -123,6 +133,10 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /api/v1/scans/{id}", s.requireAction(auth.ActionView, s.handleScanGet))
 	mux.HandleFunc("POST /api/v1/scans/{id}/stop", s.requireAction(auth.ActionScan, s.handleScanStop))
 	mux.HandleFunc("POST /api/v1/scans/{id}/resume", s.requireAction(auth.ActionScan, s.handleScanResume))
+	// S9-4: DescriptionRunner — агентское описание БД по scan_id.
+	mux.HandleFunc("POST /api/v1/scans/{id}/description-runs", s.requireAction(auth.ActionScan, s.handleDescriptionStart))
+	mux.HandleFunc("GET /api/v1/scans/{id}/description-runs", s.requireAction(auth.ActionView, s.handleDescriptionList))
+	mux.HandleFunc("GET /api/v1/description-runs/{id}", s.requireAction(auth.ActionView, s.handleDescriptionGet))
 
 	mux.HandleFunc("GET /api/v1/verdicts", s.requireAction(auth.ActionView, s.handleVerdictList))
 	mux.HandleFunc("GET /api/v1/verdicts/{id}", s.requireAction(auth.ActionView, s.handleVerdictGet))

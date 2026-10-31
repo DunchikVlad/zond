@@ -11,6 +11,12 @@
     <button type="submit">Продолжить</button>
   </form>
   {{end}}
+  {{if and .DescRunner (or (eq .Scan.Status "done") (eq .Scan.Status "partial") (eq .Scan.Status "failed") (eq .Scan.Status "budget_exceeded"))}}
+  <form method="post" action="/scans/{{.Scan.ID}}/describe" style="display:inline">
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    <button type="submit" title="Агентское описание БД по вердиктам прогона (S9-4)">Описание БД</button>
+  </form>
+  {{end}}
 </p>
 
 <h2>Таблицы (чекпоинты п. 13)</h2>
@@ -26,6 +32,32 @@
 <p>Всего: {{.Summary.Total}} · по статусам: {{range $k, $v := .Summary.ByStatus}}{{$k}}={{$v}} {{end}}</p>
 <p>По слоям: {{range $k, $v := .Summary.ByLayer}}{{$k}}={{$v}} {{end}}</p>
 <p><a href="/verdicts?scan_id={{.Scan.ID}}">Открыть вердикты прогона →</a></p>
+
+<h2>Описание БД (S9-4)</h2>
+{{if .DescRuns}}
+<table>
+  <tr><th>Статус</th><th>Версия</th><th>Агент</th><th>Модель</th><th>Токены</th><th>$</th><th>Создан</th></tr>
+  {{range .DescRuns}}
+  <tr>
+    <td><span class="badge s-{{.Status}}">{{.Status}}</span></td>
+    <td>v{{.PromptVersion}}</td>
+    <td>{{.AgentID}}</td>
+    <td>{{.Model}}</td>
+    <td>{{.TokensIn}}/{{.TokensOut}}</td>
+    <td>{{.CostUSD}}</td>
+    <td>{{fmtTime .CreatedAt}}</td>
+  </tr>
+  {{if .ResultJSON}}
+  <tr><td colspan="7"><details><summary>Результат</summary><pre style="white-space:pre-wrap;max-width:100%">{{.ResultJSON}}</pre></details></td></tr>
+  {{end}}
+  {{if .Error}}
+  <tr><td colspan="7" class="err">{{.Error}}</td></tr>
+  {{end}}
+  {{end}}
+</table>
+{{else}}
+<p>Описание ещё не генерировалось.</p>
+{{end}}
 
 <h2>Экономика LLM</h2>
 {{if .Cost}}

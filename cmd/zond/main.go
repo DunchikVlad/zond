@@ -718,6 +718,29 @@ func newAPIScanID() string {
 	return fmt.Sprintf("%d-%s", time.Now().Unix(), hex.EncodeToString(b[:]))
 }
 
+// buildDescriptionRunner строит DescriptionRunner для S9-4 (агентское описание БД).
+// Использует первый агент из реестра detectors.yaml; без LLM — nil (недоступен).
+func buildDescriptionRunner(b *config.Bundle, st *store.Store, log *slog.Logger) *scanengine.DescriptionRunner {
+	agents := b.Detectors.Agents
+	if len(agents) == 0 {
+		log.Warn("serve: description runner не подключён: реестр agents пуст")
+		return nil
+	}
+	main := agents[0]
+	key := os.Getenv(main.APIKeyEnv)
+	if key == "" {
+		log.Warn("serve: description runner не подключён: env " + main.APIKeyEnv + " не задан")
+		return nil
+	}
+	gate := agentproxy.NewGate(b.Detectors.Proxy.MaxConcurrent, b.Detectors.Proxy.RateLimitRPS)
+	proxy, err := newAgentProxy(main, key, b.Taxonomy.Version, taxonomyLabels(b.Taxonomy), gate, b.Detectors.Proxy.Offline, "")
+	if err != nil {
+		log.Warn("serve: description runner не подключён", "error", err)
+		return nil
+	}
+	return scanengine.NewDescriptionRunner(st, proxy, main.ID, main.Model)
+}
+
 func runServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dir := fs.String("config", "configs", "каталог с конфигурационными файлами")
@@ -805,6 +828,15 @@ func runServe(args []string) int {
 	}
 	runner := newEngineRunner(b, st, log, *useLLM, resolver)
 	runner.bundleFn = bundleHot.Load // S8-7/S8-8: горячие источники и детекторы
+	// S9-4: DescriptionRunner — агентское описание БД по scan_id.
+	// Требует LLM (агент из реестра detectors.yaml); без LLM — nil (недоступен).
+	var descRunner *scanengine.DescriptionRunner
+	if *useLLM && len(b.Detectors.Agents) > 0 {
+		descRunner = buildDescriptionRunner(b, st, log)
+		if descRunner != nil {
+			log.Info("serve: description runner подключён (S9-4)")
+		}
+	}
 	// Аутентификация (инкремент 5в, п. 11.3/п. 14.2): включается sso.enabled
 	// в connections.yaml; admin-token fallback — env CLASSIFIER_ADMIN_TOKEN
 	// при admin_token_fallback=true (bootstrap/аварийный доступ).
@@ -825,6 +857,9 @@ func runServe(args []string) int {
 	}
 	var opts []api.Option
 	opts = append(opts, api.WithRunner(runner), api.WithExportMaxRows(*exportMax), api.WithAuth(authCfg))
+	if descRunner != nil {
+		opts = append(opts, api.WithDescriptionRunner(descRunner))
+	}
 	// SAML SP (инкремент 5в-5, ADR-0011): метаданные IdP — при старте
 	// (fail-fast при недоступности, п. 11.3), refresh каждые 24 ч.
 	var sp *auth.SP
@@ -882,6 +917,7 @@ func runServe(args []string) int {
 		web.WithBundle(bundleHot.Load),
 		web.WithDetectorsPath(detectorsPath),
 		web.WithApplyDetectors(applyDetectors),
+		web.WithDescriptionRunner(descRunner), // S9-4
 	)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "serve: web:", err)

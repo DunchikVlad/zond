@@ -200,6 +200,98 @@ func (p *Proxy) Classify(ctx context.Context, nativeType string, values []string
 	return res, nil
 }
 
+// DescribeResult — валидированный ответ описания БД (S9-4).
+type DescribeResult struct {
+	PurposeRU             string           `json:"purpose_ru"`
+	TableGroups           []TableGroup     `json:"table_groups"`
+	DataCategories        []string         `json:"data_categories"`
+	SensitivityZones      SensitivityZones `json:"sensitivity_zones"`
+	Risks                 []string         `json:"risks"`
+	Ambiguities           []string         `json:"ambiguities"`
+	ReviewRecommendations []string         `json:"review_recommendations"`
+	PromptVersion         string           `json:"prompt_version"`
+	Usage                 Usage            `json:"usage"`
+	Latency               time.Duration    `json:"latency_ms"`
+}
+
+// TableGroup — группа таблиц в описании БД.
+type TableGroup struct {
+	NameRU        string   `json:"name_ru"`
+	Tables        []string `json:"tables"`
+	DescriptionRU string   `json:"description_ru"`
+}
+
+// SensitivityZones — зоны чувствительности в описании БД.
+type SensitivityZones struct {
+	PIITables  []string `json:"pii_tables"`
+	PCITables  []string `json:"pci_tables"`
+	PHITables  []string `json:"phi_tables"`
+	NoneTables []string `json:"none_tables"`
+}
+
+// descriptionSchema — ответ описания БД (S9-4).
+type descriptionSchema struct {
+	PurposeRU             string           `json:"purpose_ru"`
+	TableGroups           []TableGroup     `json:"table_groups"`
+	DataCategories        []string         `json:"data_categories"`
+	SensitivityZones      SensitivityZones `json:"sensitivity_zones"`
+	Risks                 []string         `json:"risks"`
+	Ambiguities           []string         `json:"ambiguities"`
+	ReviewRecommendations []string         `json:"review_recommendations"`
+}
+
+// Describe вызывает агента для генерации описания БД (S9-4).
+// input — агрегированный JSON вердиктов (DescriptionInput); агент видит только
+// лейблы/типы/sensitivity, без сырых значений и идентификаторов инфраструктуры.
+// Один вызов = один слот лимитера; usage и latency — для учёта экономики.
+func (p *Proxy) Describe(ctx context.Context, input string) (*DescribeResult, error) {
+	if p.gate != nil {
+		if err := p.gate.Acquire(ctx); err != nil {
+			return nil, fmt.Errorf("agentproxy: лимит вызовов: %w", err)
+		}
+		defer p.gate.Release()
+	}
+	sys := prompts.DescriptionSystem()
+	usr := prompts.DescriptionUser(input)
+	var ans descriptionSchema
+	start := time.Now()
+	_, usage, err := p.call(ctx, sys, usr, func(b []byte) error {
+		if err := json.Unmarshal(b, &ans); err != nil {
+			return fmt.Errorf("невалидный JSON описания: %w", err)
+		}
+		return p.validateDescription(&ans)
+	})
+	latency := time.Since(start)
+	if err != nil {
+		return nil, err
+	}
+	res := &DescribeResult{
+		PurposeRU: ans.PurposeRU, TableGroups: ans.TableGroups,
+		DataCategories: ans.DataCategories, SensitivityZones: ans.SensitivityZones,
+		Risks: ans.Risks, Ambiguities: ans.Ambiguities,
+		ReviewRecommendations: ans.ReviewRecommendations,
+		PromptVersion:         prompts.DescriptionVersion, Latency: latency,
+	}
+	if usage != nil {
+		res.Usage = *usage
+	}
+	return res, nil
+}
+
+// validateDescription — строгая валидация ответа описания БД (S9-4).
+func (p *Proxy) validateDescription(a *descriptionSchema) error {
+	if n := len([]rune(a.PurposeRU)); n < 10 || n > 500 {
+		return fmt.Errorf("agentproxy: purpose_ru длиной %d вне [10,500]", n)
+	}
+	if len(a.TableGroups) == 0 {
+		return errors.New("agentproxy: table_groups пуст")
+	}
+	if len(a.DataCategories) == 0 {
+		return errors.New("agentproxy: data_categories пуст")
+	}
+	return nil
+}
+
 // Verify — режим верификатора (п. 5.3, п. 7): кандидат + маскированные значения.
 func (p *Proxy) Verify(ctx context.Context, candidate, nativeType string, values []string) (*VerifyResult, error) {
 	masked := maskValues(values, p.agent.MaxValuesPerCall)

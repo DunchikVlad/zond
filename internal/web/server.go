@@ -77,6 +77,9 @@ type Server struct {
 	bundle         func() *config.Bundle
 	detectorsPath  string
 	applyDetectors func() (*config.Detectors, error)
+
+	// S9-4: DescriptionRunner для агентского описания БД.
+	descRunner scanengine.DescriptionRunnerInterface
 }
 
 // Option — настройка Server (S8-7: провайдеры конфигурации для /sources).
@@ -108,6 +111,11 @@ func WithBundle(fn func() *config.Bundle) Option {
 // WithDetectorsPath — путь к редактируемому detectors.yaml.
 func WithDetectorsPath(path string) Option {
 	return func(s *Server) { s.detectorsPath = path }
+}
+
+// WithDescriptionRunner — S9-4: runner агентского описания БД.
+func WithDescriptionRunner(r scanengine.DescriptionRunnerInterface) Option {
+	return func(s *Server) { s.descRunner = r }
 }
 
 // WithApplyDetectors — колбэк «применить detectors.yaml без рестарта».
@@ -178,6 +186,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /scans/start", s.requireRole(auth.ActionScan, s.handleScanStart))
 	mux.HandleFunc("POST /scans/{id}/stop", s.requireRole(auth.ActionScan, s.handleScanStop))
 	mux.HandleFunc("POST /scans/{id}/resume", s.requireRole(auth.ActionScan, s.handleScanResume))
+	mux.HandleFunc("POST /scans/{id}/describe", s.requireRole(auth.ActionScan, s.handleScanDescribe)) // S9-4
 	mux.HandleFunc("GET /scans/{id}", s.handleScanDetail)
 	mux.HandleFunc("GET /verdicts", s.handleVerdicts)
 	mux.HandleFunc("GET /verdicts/{id}/calls", s.handleVerdictCalls) // S9-2: фрагмент вызовов LLM
@@ -459,6 +468,22 @@ func (s *Server) handleScanStop(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/scans/"+id, http.StatusFound)
 }
 
+// handleScanDescribe — POST /scans/{id}/describe: запуск агентского описания БД (S9-4).
+// Синхронный вызов: один LLM-запрос, результат на той же странице.
+func (s *Server) handleScanDescribe(w http.ResponseWriter, r *http.Request) {
+	if s.descRunner == nil {
+		s.renderError(w, http.StatusNotImplemented, "генерация описания недоступна (LLM не подключён)")
+		return
+	}
+	id := r.PathValue("id")
+	_, err := s.descRunner.Run(r.Context(), id, s.subject(r).Actor)
+	if err != nil {
+		s.renderError(w, http.StatusInternalServerError, "описание: "+err.Error())
+		return
+	}
+	http.Redirect(w, r, "/scans/"+id, http.StatusFound)
+}
+
 func (s *Server) handleScanDetail(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
@@ -471,6 +496,7 @@ func (s *Server) handleScanDetail(w http.ResponseWriter, r *http.Request) {
 	sum, _ := s.st.VerdictSummary(ctx, id)
 	cost, _ := s.st.ScanCostStats(ctx, id)
 	failed, _ := s.st.FailedTables(ctx, id)
+	descRuns, _ := s.st.ListDescriptionRuns(ctx, id) // S9-4
 	if sum == nil {
 		sum = &store.Summary{ByStatus: map[string]int{}, ByLabel: map[string]int{}, ByLayer: map[string]int{}}
 	}
@@ -478,6 +504,7 @@ func (s *Server) handleScanDetail(w http.ResponseWriter, r *http.Request) {
 		"Subject": s.subject(r), "Title": "Прогон " + id, "Scan": sc,
 		"Tables": tables, "Summary": sum, "Cost": cost, "Errors": failed,
 		"Runner": s.runner != nil, "CSRF": s.csrfToken(r),
+		"DescRuns": descRuns, "DescRunner": s.descRunner != nil, // S9-4
 	})
 }
 

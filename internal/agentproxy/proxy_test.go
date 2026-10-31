@@ -102,6 +102,87 @@ func mustNew(t *testing.T, agent Agent, opts ...Option) *Proxy {
 
 const okAnswer = `{"label":"PHONE","confidence":0.8,"sensitivity":"PII","reason_ru":"формат телефона"}`
 
+const okDescription = `{"purpose_ru":"БД клиентских данных интернет-магазина","table_groups":[{"name_ru":"Пользователи","tables":["users","orders"],"description_ru":"Данные клиентов"}],"data_categories":["email","phone"],"sensitivity_zones":{"pii_tables":["users"],"pci_tables":[],"phi_tables":[],"none_tables":["orders"]},"risks":["хранение телефонов"],"ambiguities":["неясна роль таблицы logs"],"review_recommendations":["ревью users.email"]}`
+
+func TestDescribeHappyPath(t *testing.T) {
+	f := newFakeLLM(t, okDescription)
+	p := mustNew(t, testAgent(f.url()))
+	input := `{"tables":[{"name":"users","columns":[{"path":"email","native_type":"String","label":"EMAIL","sensitivity":"PII","confidence":0.9}]}]}`
+	res, err := p.Describe(t.Context(), input)
+	if err != nil {
+		t.Fatalf("Describe: %v", err)
+	}
+	if res.PromptVersion != prompts.DescriptionVersion {
+		t.Fatalf("PromptVersion = %q, want %q", res.PromptVersion, prompts.DescriptionVersion)
+	}
+	if res.PurposeRU == "" {
+		t.Fatal("PurposeRU пуст")
+	}
+	if len(res.TableGroups) == 0 {
+		t.Fatal("TableGroups пуст")
+	}
+	if len(res.DataCategories) == 0 {
+		t.Fatal("DataCategories пуст")
+	}
+	if res.Latency <= 0 {
+		t.Fatal("Latency не установлена")
+	}
+}
+
+func TestDescribeIsolationNoRawValues(t *testing.T) {
+	f := newFakeLLM(t, okDescription)
+	p := mustNew(t, testAgent(f.url()))
+	// Агрегированный вход: только лейблы/типы/sensitivity, без сырых значений.
+	input := `{"tables":[{"name":"users","columns":[{"path":"email","native_type":"String","label":"EMAIL","sensitivity":"PII","confidence":0.9}]}]}`
+	if _, err := p.Describe(t.Context(), input); err != nil {
+		t.Fatalf("Describe: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.bodies) != 1 {
+		t.Fatalf("вызовов %d, ожидался 1", len(f.bodies))
+	}
+	var req map[string]any
+	if err := json.Unmarshal([]byte(f.bodies[0]), &req); err != nil {
+		t.Fatal(err)
+	}
+	// system содержит DescriptionSystem, user — DescriptionUser с <data>
+	msgs := req["messages"].([]any)
+	sys := msgs[0].(map[string]any)["content"].(string)
+	usr := msgs[1].(map[string]any)["content"].(string)
+	if !strings.Contains(sys, "аналитик базы данных") {
+		t.Fatal("system не содержит промпт описания")
+	}
+	if !strings.Contains(usr, "<data>") {
+		t.Fatal("user не содержит <data>")
+	}
+	if !strings.Contains(usr, "EMAIL") {
+		t.Fatal("user не содержит агрегированный лейбл")
+	}
+}
+
+func TestDescribeValidationError(t *testing.T) {
+	// Невалидный ответ: отсутствует purpose_ru
+	bad := `{"table_groups":[],"data_categories":[],"sensitivity_zones":{"pii_tables":[],"pci_tables":[],"phi_tables":[],"none_tables":[]},"risks":[],"ambiguities":[],"review_recommendations":[]}`
+	f := newFakeLLM(t, bad)
+	p := mustNew(t, testAgent(f.url()))
+	input := `{"tables":[{"name":"t","columns":[]}]}`
+	_, err := p.Describe(t.Context(), input)
+	if err == nil {
+		t.Fatal("ожидалась ошибка валидации")
+	}
+}
+
+func TestDescribeEmptyInput(t *testing.T) {
+	f := newFakeLLM(t, okDescription)
+	p := mustNew(t, testAgent(f.url()))
+	// Пустой вход — агент всё равно вызывается (агрегация на стороне runner).
+	_, err := p.Describe(t.Context(), "{}")
+	if err != nil {
+		t.Fatalf("Describe: %v", err)
+	}
+}
+
 func TestClassifyHappyPath(t *testing.T) {
 	f := newFakeLLM(t, okAnswer)
 	p := mustNew(t, testAgent(f.url()))
