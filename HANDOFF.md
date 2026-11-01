@@ -79,6 +79,44 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
+Снимок от 2026-11-01 ~08:30 UTC (сессия: пересборка стенда на Debian 13;
+код `76e1629`+`635ec4a`, документация этим «-док» коммитом):
+
+- **Новый стенд развёрнут с нуля и проверен**. Адреса (прежние
+  .113/.119 выведены): приложение — **192.168.31.248** (`/opt/zond/{bin,
+  configs,data,zond.env}`, systemd `zond.service`, UI 0.0.0.0:8080),
+  БД-источники — **192.168.31.64** (ClickHouse 26.9.9.28, MongoDB 8.0.34,
+  PostgreSQL 17.11 — новый источник `pg-test`). ОС Debian 13 (trixie),
+  AMD Ryzen 7 7700 (AVX2 — ограничения старого стенда сняты), Docker нет.
+  SSH `test@test`/`test`, sudo NOPASSWD. Подробности:
+  `docs/progress/2026-10-18-test-environment.md` п. 9.
+- connections.yaml: ch-test/mongo-test → .64, добавлен pg-test;
+  ci.env += PG_TEST_PASSWORD. Сборка v0.1-38-gd27576b-dirty-stand
+  задеплоена. LLM не настроен (KIMI_API_KEY на стенде нет).
+- **Тестирование** (протокол `docs/validation/2026-11-01-stand-deployment.md`):
+  doctor — 3 тестовых источника OK; сканы ch/mongo/pg — done (PostgreSQL
+  коннектор S9-5 впервые живьём); API/UI/ревью/дрейф/экспорт/аудит
+  (hash-chain OK)/бэкап — зелёные; resume done-скана и description-runs
+  без LLM корректно отклоняются.
+- **Замечания** (полный текст в протоколе):
+  - З1 (баг): ClickHouse 26.x — ListTables сканирует `INFORMATION_SCHEMA`
+    (uppercase): фильтр `connector.go:43` регистрозависим → 21 таблица,
+    489 шумовых вердиктов (64 ложных PERSON_NAME PII). Фикс: `lower(database)`.
+  - З2 (безопасность): при `sso.enabled: false` аутентификация отключена
+    полностью — API/UI отдают 200 без токена и с неверным токеном
+    (blueprint п. 12 обещает «только admin-токен»); rate-limit S9-6 в этом
+    режиме не действует (500 rps-burst → все 200).
+  - З3: 3 теста agentproxy (Latency>0) падают на Windows (гранулярность
+    таймера), на Linux зелёные — `make ci` на Windows красный из-за этого.
+  - З4: сеть стенда до внешних CDN 10–15 КБ/с, apt зависает — софт
+    ставить скачиванием deb на машине разработчика + scp + dpkg -i.
+  - З5: `deploy/docker-compose.stand.yml` устарел (старый стенд, mongo:4.4).
+- **Следующий шаг**: решения по З1/З2 (фиксы за следующим инкрементом/
+  владельцем); далее по плану S9-7 (качество, CI, лицензии).
+- Открытое (без изменений): Kimi живой прогон ждёт баланса/ключа; fake-LLM
+  eval $0,117/1000 выше цели $0,10; CI Fuzz/coverage gate не добавлены
+  (PAT без `workflow`); LICENSE/NOTICE отсутствуют; flaky race audit.
+
 Снимок от 2026-10-31 ~16:00 UTC (сессия S9-6; код — этот коммит,
 документация этим «-док» коммитом):
 
@@ -316,110 +354,10 @@ CSRF-фикс + евиденс вердиктов; HEAD `fd2c4fa` = origin/main)
   78 обращений (24 классификации, 54 small_sample by design), токены и $
   учтены. После пополнения: `zond scan -source ch-test -llm` на .113 и
   `go run ./cmd/eval run -llm -price-in 3 -price-out 15`.
-- Прошлый снимок (проверка чужих S8-2/8-3/8-4 на стенде): см. ниже.
+- Прошлые снимки (проверка S8-2/8-3/8-4 и S8-4 fuzz) удалены 2026-11-01 —
+  относились к выведенному стенду .113/.119; ключевые открытые вопросы
+  перенесены в актуальный снимок.
 
-Снимок от 2026-10-25 ~08:10 UTC (сессия проверки: работа агента S8-2/8-3/
-8-4 **подтверждена на живом стенде**, HEAD `b9fbd9e` = origin/main):
-
-- Проверено на стенде (протокол `docs/validation/2026-10-25-stand-check.md`):
-  миграция 0009 (audit_sink_state), сканы на параллельном движке S8-2 с
-  лимитами в отчёте, SIEM-sink живьём (доставка NDJSON бэклога, закладка
-  last_seq строго за доставленным, negative: last_error + аудит не падает),
-  scan_window живьём (defer до начала окна + аудит scheduler/scan_deferred).
-  Стенд восстановлен (конфиг/данные .119 в норме, zond на .113 =
-  сборка cf6dcd5, systemd active).
-- gofmt-замечание: флаги `gofmt -l` в Windows-рабочем дереве — CRLF-
-  артефакт checkout; индекс git чист, содержательных правок не требуется.
-- Открыто: CI-шаг Fuzz (S8-4) не запушен — PAT без scope `workflow`;
-  готовый шаг в docs/validation/2026-10-24-stage-8-4.md §3; нужен PAT
-  владельца (или ручной коммит в .github/workflows/ci.yml).
-- Следующие шаги: LICENSE (владелец), LLM-метрики DoD (без стенда),
-  остальное по HANDOFF ниже.
-
-Снимок от 2026-10-24 ~19:30 UTC (сессия S8-4 — **fuzz парсеров, п. 16.10
-закрыт по коду/тестам**; всё запушено):
-
-- **S8-4 (fuzz, п. 16.10) закрыт и запушен** (HEAD `ab00c19`, код+док в
-  одном коммите — amend после отказа push, см. ниже). Новые fuzz:
-  `agentproxy.FuzzAgentResponse` (сырой content в валидной OpenAI-обёртке —
-  разбор схемы п. 5.3 не паникует) и `config.FuzzLoad{Connections,Detectors,
-  Taxonomy}` (парсер + строгая схема + интерполяция + валидация —
-  fail-fast, не паника). Существующие `FuzzMask`/`FuzzFlattenDocument` —
-  тоже в целях. Makefile: `make fuzz` (FUZZTIME). Сиды в f.Add. `make ci`
-  зелёный; все 6 целей прогнаны локально — PASS.
-- **CI-шаг Fuzz НЕ запушен**: `git push` отклонён — PAT без scope
-  `workflow` (remote не даёт менять `.github/workflows/ci.yml`). Изменение
-  workflow убрано из истории (amend), код/тесты/доки запушены без него.
-  Готовый yaml-шаг — в `docs/validation/2026-10-24-stage-8-4.md` §3;
-  добавить владельцу с scope `workflow` (или выдать PAT с этим scope).
-  Локальный прогон `make fuzz` покрывает те же цели.
-
-- **S8-3 (SIEM-sink, п. 14.2) закрыт и запушен**: код `f57f55e` + «-док»
-  (progress/validation/security/ADR-impl-stage-8-3-siem-sink, architecture
-  карта пакетов, HANDOFF). Опция `audit.sink {kind: json-tcp|syslog,
-  address, proto}` в connections.yaml (fail-fast валидация). Очередь = сам
-  append-only журнал (без dual-write: нельзя обойти пути записи); закладка
-  `audit_sink_state` (миграция 0009) двигается только за доставленное,
-  строго в порядке цепочки (SIEM сверяет hash-chain напрямую); недоступный
-  sink не роняет запись аудита; на проводе — каноническая форма
-  (CanonicalEntry: NDJSON для json-tcp, CEF-строка для syslog). serve:
-  sinkLoop (таймер 2 с, backoff 30 с на ошибку журнала). doctor: audit.sink
-  backlog (WARN при отставании). Тесты: порядок/без дублей, retry после
-  недоступности (закладка на месте, last_error), догон между циклами, CEF,
-  SinkPending, nil-safe, конфиг (10 кейсов). `make ci` + `make test-race`
-  зелёные. Стенд выключен — живой прогон (serve → тестовый приёмник) при
-  включении.
-
-- **S8-2 (per-source лимиты + окна, п. 13.2) закрыт**: код `39cbaf8`, «-док»
-  `3f92445`, юнит-тесты + фикс коллектора `4fb7d61`. connections.yaml:
-  `max_concurrent_scans` (default 1), `max_concurrent_tables` (default 2),
-  `query_timeout_s` (default 300), `scan_window "HH:MM-HH:MM"` (fail-fast;
-  через полночь). scanengine: пул воркеров поверх TableGate (результаты в
-  порядке ListTables — breaker-серия идентична sequential), queryCtx-
-  дедлайны, состояние прогона под мьютексами, буферы таблиц — локальные
-  tableState. serve: семафор max_concurrent_scans (502 сверх лимита).
-  scheduler: перескан вне окна → таймер до NextStart + аудит
-  scheduler/scan_deferred; ручные старты окном не ограничены (буква спеки).
-  `make ci` и `make test-race` зелёные, `config validate` OK. Тесты нашли
-  дефект коллектора scanTablesParallel (зависание при остановке feeder'а —
-  исправлен: буфер results, stopFeed, закрытие после wg.Wait). Стенд
-  192.168.31.* выключен — живой прогон не выполнялся (при включении —
-  проверить параллелизм/дедлайны на реальном ClickHouse).
-- **Релиз v0.1 опубликован ранее** (тег `v0.1` на `399abbd`): эталонный
-  smoke на стенде зелёный, GitHub Release с 15 артефактами (бинари,
-  SHA256SUMS, SBOM, cosign). Инкременты S0…S7г + S6г + S7г-7 + S8-1 —
-  в origin/main.
-- S8-1 (`8471a70`): классификация ошибок драйверов, retry ≤3 на retryable,
-  circuit breaker (5 подряд overload → пауза 5 мин, partial, аудит
-  source_paused), `scan -resume` (миграция 0008). Подтверждён живым
-  стендом (ClickHouse, max_execution_time + sleep-view).
-- **Следующий шаг** — по выбору: LICENSE (вопрос владельцу),
-  LLM-метрики DoD / `cmd/eval run -llm` (нет стенда), живой прогон
-  S8-2/S8-3 на стенде при его включении (параллелизм/дедлайны п. 13.2;
-  serve с audit.sink → тестовый приёмник, сверка по hash-chain).
-  Владельцу: добавить CI-шаг Fuzz (scope `workflow` — готовый yaml в
-  validation S8-4 §3). Долгов по коду нет: п. 13.2 (S8-1+S8-2), опция
-  п. 14.2 (S8-3) и fuzz п. 16.10 (S8-4) закрыты с тестами.
-- Известные проблемы: `go` не в PATH свежего Git Bash на Windows-машине —
-  брать `/c/Program Files/Go/bin` или scoop shim (на macOS-машине —
-  homebrew go в PATH); стенды БД 192.168.31.119 и keycloak могут быть
-  недоступны (не поломка кода); LLM-стенда нет. Единичный флаки
-  `go test -race ./...` — `internal/audit` под параллельной нагрузкой
-  (в изоляции стабильно ok). Часть .go-файлов периодически с CRLF —
-  норма LF, лечить `gofmt -w` и проверять `gofmt -l .` перед коммитом.
-  `eval generate` меняет `generated` в manifest.json — `make eval` не
-  регенерирует датасет. Git-статус может показывать phantom-modified:
-  проверять `git diff`, `git add -u`. Smoke serve/doctor требует
-  фиктивные ENV: `set -a && . ./configs/ci.env`. HANDOFF.md теперь
-  трекнут в репозитории (коммит `2e7c1f2`, перенос между машинами) —
-  обновление раздела 6 включается в «-док» коммит; всё равно добавлять
-  файлы явно, без `git add -A`. У release.yml проверка только
-  yaml-парсингом — прогон был на теге v0.1 (success). **PAT без scope
-  `workflow`: push, трогающий `.github/workflows/*`, отклоняется remote** —
-  workflow-файлы меняет владелец (S8-4: шаг Fuzz убран из истории, ждёт
-  добавления владельцем).
-- Открытые вопросы: выбор LICENSE для репозитория (go-licenses игнорирует
-  собственный модуль; решение — за владельцем проекта).
 
 ## 7. ЧЕК-ЛИСТ ПЕРЕДАЧИ (выполняет каждый агент)
 
