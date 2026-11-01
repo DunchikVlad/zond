@@ -19,6 +19,9 @@ sources:
   - name: mongo-test
     type: mongodb
     uri: "mongodb://test:${MONGO_TEST_PASSWORD}@192.168.31.64:27017/testdb"
+  - name: pg-test
+    type: postgresql
+    dsn: "postgres://test:${PG_TEST_PASSWORD}@192.168.31.64:5432/testdb?sslmode=disable"
 
   # Примеры продуктивных подключений (blueprint п. 12) — read-only учётки.
   - name: ch-prod
