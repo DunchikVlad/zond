@@ -79,6 +79,35 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
+Снимок от 2026-11-01 ~13:30 UTC (сессия S9-8; код `b3c0427`,
+документация этим «-док» коммитом):
+
+- **S9-8 завершён и ПРОВЕРЕН НА СТЕНДЕ**: фиксы замечаний З1/З2 из
+  протокола 2026-11-01.
+  - З1: `ListTables` ClickHouse — `lower(database)` при исключении
+    system/information_schema (CH 26.x держит uppercase-копию). На стенде:
+    скан ch-test — 1 таблица, 5 вердиктов (было 21/489).
+  - З2: при `sso.enabled=false` теперь обязателен `CLASSIFIER_ADMIN_TOKEN`
+    (blueprint п. 12): API — 401 без/с неверным токеном; UI — 302 на новый
+    `/login` (форма → сессия admin, constant-time, brute-force блокировка
+    AttemptLimiter, аудит admin_token_used/login_failure); serve fail-fast
+    без токена (код 2). rate-limit S9-6 заработал (burst → 226×429).
+    smoke-compose получил CLASSIFIER_ADMIN_TOKEN (zond-smoke-admin).
+    dev-режим без токена/SSO (тесты) не изменён.
+  - Тесты: api TestAdminTokenOnlyMode/TestNoAuthDevMode; web login_test.go
+    (закрытость страниц, флоу логина, 429, dev-режим). `go test ./...`
+    зелёный; `go test -race` (api/web/clickhouse) — на стенде Linux
+    (gcc доустановлен deb'ами через scp; toolchain go1.27.3 + vendor в
+    /tmp/gotc, /tmp/zond-src) зелёный. На Windows race недоступен (нет gcc).
+  - Подробности: `docs/progress/2026-11-01-stage-9-8-stand-fixes.md`,
+    протокол — `docs/validation/2026-11-01-stand-deployment.md` п. 5.
+- **Следующий шаг**: по плану S9-7 (качество, CI, лицензии, документация);
+  открытые З3–З6 (Windows-тесты agentproxy, сеть стенда, устаревший
+  compose-stand, LLM-контур без ключа).
+- Открытое (без изменений): Kimi живой прогон ждёт баланса/ключа; fake-LLM
+  eval $0,117/1000 выше цели $0,10; CI Fuzz/coverage gate не добавлены
+  (PAT без `workflow`); LICENSE/NOTICE отсутствуют; flaky race audit.
+
 Снимок от 2026-11-01 ~08:30 UTC (сессия: пересборка стенда на Debian 13;
 код `76e1629`+`635ec4a`, документация этим «-док» коммитом):
 

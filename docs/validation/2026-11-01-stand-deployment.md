@@ -112,3 +112,26 @@ i7-6700). Для нового стенда неприменим (AVX2 есть, 
 Следы для эксплуатации: admin-токен — `/opt/zond/zond.env` (mode 600);
 UI — http://192.168.31.248:8080. Пароли стенда test/test — только для
 изолированного контура (п. 4 test-environment).
+
+## 5. Дополнение: проверка фиксов S9-8 (З1/З2) на стенде
+
+Дата: 2026-11-01 (вечер). Сборка `v0.1-41-g55d99c0-dirty-stand` на .248.
+Инкремент: `docs/progress/2026-11-01-stage-9-8-stand-fixes.md`.
+
+| Проверка | Результат |
+|---|---|
+| **З1**: повторный скан `ch-test quick` | **1 таблица** (`default.customers`), 5 вердиктов (EMAIL 1, PHONE 1, PERSON_NAME 1, UNKNOWN 2) — системные view INFORMATION_SCHEMA исключены |
+| **З2 API**: `GET /api/v1/scans` без токена / с неверным | **401 / 401** (раньше 200) |
+| **З2 API**: с верным X-Admin-Token | 200 |
+| **З2 UI**: GET /scans, /settings без сессии | **302 → /login** |
+| **З2 UI**: GET /login | 200 (форма); POST неверный токен → 403; верный → 302 /scans + cookie `zond_session`; /scans и /settings с сессией → 200 |
+| **З2 rate-limit (S9-6)**: burst 500 GET /api/v1/scans (282 rps) | **226 × 429**, 274 × 200 — лимитер действует (раньше все 200) |
+| **З2 fail-fast**: `serve` без CLASSIFIER_ADMIN_TOKEN при sso off | выход с кодом 2 и сообщением о п. 12 |
+| health без auth | 200 (по построению, п. 15) |
+| Аудит | `admin_token_used` (warn) фиксируется; hash-chain OK (523 записи) |
+| doctor -online | ch-test/mongo-test/pg-test OK, итог без изменений |
+
+Проверки перед деплоем: `go vet`/build/`go test ./...` локально зелёные;
+`go test -race` (api, web, clickhouse) на Linux-стенде (gcc + go1.27.3
+в /tmp/gotc, vendor) — зелёные (api 314 с, web 162 с). Замечания З1/З2
+закрыты; З3–З6 остаются открытыми (см. п. 3).
