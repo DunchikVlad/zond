@@ -79,7 +79,31 @@ MongoDB): regex-правила + LLM-ансамбль через agent-proxy с 
 
 ## 6. ТЕКУЩЕЕ СОСТОЯНИЕ (обновляется каждым агентом)
 
-Снимок от 2026-10-31 ~14:00 UTC (сессия S9-5; код — этот коммит,
+Снимок от 2026-10-31 ~16:00 UTC (сессия S9-6; код — этот коммит,
+документация этим «-док» коммитом):
+
+- **S9-6 завершён**: оставшиеся продуктовые доработки.
+  - **Per-profile сэмплирование** (quick/deep/custom): `ScanConfig` получил
+    `Quick`/`Deep` `SampleConfig`; `config.SampleForProfile()` — выбор по
+    профилю, merge непустых полей поверх default. `engineConfig` использует
+    `config.SampleForProfile`. detectors.yaml: quick (1%, 5k rows, 100 chars),
+    deep (10%, 50k rows, 500 chars). Валидация per-profile в `Validate()`.
+  - **API rate-limit** (п. 11.2): `api.RateLimiter` — token-bucket по субъекту
+    (actor), default 100 req/s. Подключён в `withAuth` после успешной
+    аутентификации. 429 при превышении. Тесты: 5 кейсов.
+  - **UX**: keyboard shortcuts y/n/l для ревью (vanilla JS, первая карточка);
+    скрытие admin-ссылок (audit/settings/sources) и admin-действий
+    (stop/resume/describe) у viewer в шаблонах.
+  - Подробности: `docs/progress/2026-10-31-stage-9-6-ux.md`.
+- Проверки: исходный и финальный `make ci`, `go test -race` (config, api,
+  web) — зелёные.
+- **Следующий шаг S9-7**: качество, CI, лицензии, документация (живой Kimi
+  eval, coverage gate, LICENSE/NOTICE, flaky audit race).
+- Открытое: Kimi живой прогон ждёт пополнения баланса; fake-LLM eval
+  $0,117/1000 выше цели $0,10. CI Fuzz/coverage gate не добавлены (PAT без
+  `workflow`), LICENSE/NOTICE отсутствуют; flaky race audit не проявился.
+
+Снимок от 2026-10-31 ~14:00 UTC (сессия S9-5; код `6fd2483`,
 документация этим «-док» коммитом):
 
 - **S9-5 завершён**: выбор СУБД и новый коннектор PostgreSQL.
