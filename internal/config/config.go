@@ -513,7 +513,10 @@ type ClusterConfig struct {
 // ScanConfig — профиль и параметры сэмплирования (blueprint п. 5.2).
 type ScanConfig struct {
 	Profile string       `yaml:"profile"` // quick | deep | custom
-	Sample  SampleConfig `yaml:"sample"`
+	Sample  SampleConfig `yaml:"sample"`  // default (custom)
+	// S9-6: per-profile параметры. quick/deep переопределяют default.
+	Quick SampleConfig `yaml:"quick"`
+	Deep  SampleConfig `yaml:"deep"`
 }
 
 // SampleConfig — режим N строк или p% с предохранителями.
@@ -524,6 +527,42 @@ type SampleConfig struct {
 	MaxRows        int64   `yaml:"max_rows"`
 	MaxStringChars int     `yaml:"max_string_chars"`
 	DedupValues    bool    `yaml:"dedup_values"`
+}
+
+// SampleForProfile выбирает параметры сэмплирования по профилю (S9-6).
+// quick/deep переопределяют default (sample); custom — сам default.
+func SampleForProfile(scan ScanConfig) SampleConfig {
+	sc := scan.Sample // default (custom)
+	switch scan.Profile {
+	case "quick":
+		sc = mergeSample(sc, scan.Quick)
+	case "deep":
+		sc = mergeSample(sc, scan.Deep)
+	}
+	return sc
+}
+
+// mergeSample переопределяет непустые поля override поверх base.
+func mergeSample(base, override SampleConfig) SampleConfig {
+	if override.Mode != "" {
+		base.Mode = override.Mode
+	}
+	if override.Value > 0 {
+		base.Value = override.Value
+	}
+	if override.MinRows > 0 {
+		base.MinRows = override.MinRows
+	}
+	if override.MaxRows > 0 {
+		base.MaxRows = override.MaxRows
+	}
+	if override.MaxStringChars > 0 {
+		base.MaxStringChars = override.MaxStringChars
+	}
+	if override.DedupValues {
+		base.DedupValues = true
+	}
+	return base
 }
 
 // EnsembleConfig — пороги и веса ансамбля (blueprint п. 5.6, п. 7).
@@ -568,6 +607,21 @@ func (d *Detectors) Validate() error {
 	}
 	if d.Scan.Sample.MaxRows <= 0 {
 		errs = append(errs, errors.New("scan.sample.max_rows должен быть > 0"))
+	}
+	// S9-6: валидация per-profile параметров (quick/deep). Пустые — наследуют default.
+	for name, p := range map[string]SampleConfig{"quick": d.Scan.Quick, "deep": d.Scan.Deep} {
+		if p.Mode != "" && !slices.Contains(sampleModes, p.Mode) {
+			errs = append(errs, fmt.Errorf("scan.%s.mode: допустимы %v, получено %q", name, sampleModes, p.Mode))
+		}
+		if p.Value < 0 {
+			errs = append(errs, fmt.Errorf("scan.%s.value должен быть >= 0 (0 = наследовать sample)", name))
+		}
+		if p.MaxRows < 0 {
+			errs = append(errs, fmt.Errorf("scan.%s.max_rows должен быть >= 0 (0 = наследовать sample)", name))
+		}
+		if p.MaxStringChars < 0 {
+			errs = append(errs, fmt.Errorf("scan.%s.max_string_chars должен быть >= 0 (0 = наследовать sample)", name))
+		}
 	}
 	if d.Ensemble.TauAccept <= 0 || d.Ensemble.TauAccept > 1 {
 		errs = append(errs, fmt.Errorf("ensemble.tau_accept должен быть в (0, 1], получено %v", d.Ensemble.TauAccept))

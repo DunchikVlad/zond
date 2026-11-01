@@ -5,6 +5,7 @@ version: "1"
 
 scan:
   profile: deep # quick | deep | custom (blueprint п. 5.2)
+  # default (custom): полный сэмпл для максимальной точности.
   sample:
     mode: percent # rows | percent
     value: 5
@@ -12,6 +13,21 @@ scan:
     max_rows: 20000 # предохранитель
     max_string_chars: 200 # усечение длинных строк
     dedup_values: true # только уникальные значения в анализ
+  # S9-6: per-profile параметры. Непустые поля переопределяют default.
+  quick: # быстрый разведочный: мало строк, без LLM на малых сэмплах
+    mode: percent
+    value: 1
+    min_rows: 50
+    max_rows: 5000
+    max_string_chars: 100
+    dedup_values: true
+  deep: # глубокий: максимальный сэмпл для точности
+    mode: percent
+    value: 10
+    min_rows: 200
+    max_rows: 50000
+    max_string_chars: 500
+    dedup_values: true
 
 ensemble:
   tau_accept: 0.80 # >= и отрыв от второго лейбла >= 0.3 -> auto_accepted

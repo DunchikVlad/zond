@@ -1,6 +1,28 @@
 {{template "header" .}}
 <p>Очередь ручного ревью (pending, риск первыми — п. 11.3). Всего: {{.Total}}</p>
+<p class="ev">Клавиши: <kbd>y</kbd> — подтвердить, <kbd>n</kbd> — отклонить, <kbd>l</kbd> — пере-классифицировать (первая карточка).</p>
 <div id="queue">
 {{template "review_queue.html" .}}
 </div>
+<script>
+// S9-6: keyboard shortcuts y/n/l для ревью (без JS-фреймворка, vanilla).
+document.addEventListener('keydown', function(e) {
+	if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+	var card = document.querySelector('#queue .card');
+	if (!card) return;
+	var id = card.querySelector('input[name=ids]').value;
+	var action = null;
+	if (e.key === 'y') action = 'confirm';
+	if (e.key === 'n') action = 'reject';
+	if (e.key === 'l') {
+		var btn = card.querySelector('button[hx-vals*=relabel]');
+		if (btn) { btn.click(); e.preventDefault(); }
+		return;
+	}
+	if (!action) return;
+	e.preventDefault();
+	var btn = card.querySelector('button[hx-vals*=' + action + ']');
+	if (btn) btn.click();
+});
+</script>
 {{template "footer" .}}

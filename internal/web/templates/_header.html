@@ -24,9 +24,11 @@ document.body.addEventListener('htmx:configRequest', function (e) {
   <a href="/drift">Дрейф</a>
   <a href="/cost">Экономика</a>
   <a href="/alerts">Алерты</a>
+  {{if eq .Subject.Role "admin"}}
   <a href="/audit">Аудит</a>
   <a href="/settings">Настройки</a>
   <a href="/sources">Источники</a>
+  {{end}}
   <span class="who">{{.Subject.Actor}} ({{.Subject.Role}})</span>
   <a class="logout" href="/saml/logout">Выйти</a>
 </nav>

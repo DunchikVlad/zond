@@ -48,6 +48,9 @@ type AuthConfig struct {
 	// nil — без ограничения (тесты, контур без SSO не затрагивается:
 	// middleware отключён вместе с auth.Enabled).
 	Limiter *auth.AttemptLimiter
+	// RateLimiter — общий rate-limit запросов API на субъекта (п. 11.2, S9-6);
+	// nil — без ограничения.
+	RateLimiter *RateLimiter
 }
 
 // withAuth — middleware аутентификации: разрешает субъекта запроса.
@@ -97,6 +100,12 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		}
 		if s.auth.Limiter != nil {
 			s.auth.Limiter.Reset(key)
+		}
+		// S9-6: общий rate-limit на субъекта (после успешной аутентификации).
+		if s.auth.RateLimiter != nil && !s.auth.RateLimiter.Allow(subj.Actor) {
+			writeError(w, http.StatusTooManyRequests, CodeRateLimited,
+				"превышен лимит запросов — повторите позже", nil)
+			return
 		}
 		next.ServeHTTP(w, r.WithContext(auth.WithSubject(r.Context(), subj)))
 	})

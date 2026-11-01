@@ -4,19 +4,19 @@
   Статус: <span class="badge s-{{.Scan.Status}}">{{.Scan.Status}}</span> ·
   Старт: {{fmtTime .Scan.StartedAt}} · Финиш: {{fmtTimeP .Scan.FinishedAt}}
   {{if .Scan.PromptHash}} · Промпт: v{{.Scan.PromptBaseVersion}} · {{.Scan.PromptHash}}{{end}}
-  {{if eq .Scan.Status "running"}} · <button hx-post="/scans/{{.Scan.ID}}/stop" class="danger">Остановить</button>{{end}}
-  {{if or (eq .Scan.Status "partial") (eq .Scan.Status "interrupted")}}
+  {{if eq .Scan.Status "running"}}{{if eq $.Subject.Role "admin"}} · <button hx-post="/scans/{{.Scan.ID}}/stop" class="danger">Остановить</button>{{end}}{{end}}
+  {{if or (eq .Scan.Status "partial") (eq .Scan.Status "interrupted")}}{{if eq $.Subject.Role "admin"}}
   <form method="post" action="/scans/{{.Scan.ID}}/resume" style="display:inline">
     <input type="hidden" name="csrf_token" value="{{.CSRF}}">
     <button type="submit">Продолжить</button>
   </form>
-  {{end}}
-  {{if and .DescRunner (or (eq .Scan.Status "done") (eq .Scan.Status "partial") (eq .Scan.Status "failed") (eq .Scan.Status "budget_exceeded"))}}
+  {{end}}{{end}}
+  {{if and .DescRunner (or (eq .Scan.Status "done") (eq .Scan.Status "partial") (eq .Scan.Status "failed") (eq .Scan.Status "budget_exceeded"))}}{{if eq $.Subject.Role "admin"}}
   <form method="post" action="/scans/{{.Scan.ID}}/describe" style="display:inline">
     <input type="hidden" name="csrf_token" value="{{.CSRF}}">
     <button type="submit" title="Агентское описание БД по вердиктам прогона (S9-4)">Описание БД</button>
   </form>
-  {{end}}
+  {{end}}{{end}}
 </p>
 
 <h2>Таблицы (чекпоинты п. 13)</h2>

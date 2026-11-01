@@ -346,32 +346,35 @@ func runScan(args []string) int {
 
 // engineConfig собирает scanengine.Config из bundle конфигурации
 // (общая точка для CLI `scan` и serve-runner'а, инкремент 5б).
+// S9-6: параметры сэмплирования выбираются по профилю (quick/deep переопределяют default).
 func engineConfig(b *config.Bundle) scanengine.Config {
+	sc := config.SampleForProfile(b.Detectors.Scan)
 	mode := connector.SamplePercent
-	if b.Detectors.Scan.Sample.Mode == "rows" {
+	if sc.Mode == "rows" {
 		mode = connector.SampleRows
 	}
 	cfg := scanengine.Config{
-		TauAccept:         b.Detectors.Ensemble.TauAccept,
-		TauReview:         b.Detectors.Ensemble.TauReview,
-		Weights:           b.Detectors.Ensemble.Weights,
-		SampleMode:        mode,
-		SampleValue:       b.Detectors.Scan.Sample.Value,
-		MaxRows:           b.Detectors.Scan.Sample.MaxRows,
-		MaxStringChars:    b.Detectors.Scan.Sample.MaxStringChars,
-		Dedup:             b.Detectors.Scan.Sample.DedupValues,
-		TaxonomyVersion:   b.Taxonomy.Version,
-		DetectorsVersion:  b.Detectors.Version,
-		Sensitivity:       sensitivityMap(b.Taxonomy),
-		TaxonomyLabels:    taxonomyLabels(b.Taxonomy),
-		Clustering:        true, // п. 7.6
+		TauAccept:        b.Detectors.Ensemble.TauAccept,
+		TauReview:        b.Detectors.Ensemble.TauReview,
+		Weights:          b.Detectors.Ensemble.Weights,
+		SampleMode:       mode,
+		SampleValue:      sc.Value,
+		MaxRows:          sc.MaxRows,
+		MaxStringChars:   sc.MaxStringChars,
+		Dedup:            sc.DedupValues,
+		TaxonomyVersion:  b.Taxonomy.Version,
+		DetectorsVersion: b.Detectors.Version,
+
+		ConfigFingerprint: "", // заполняется вызывающим (serve/CLI)
+		BinaryVersion:     "", // заполняется вызывающим
+		MinValuesForLLM:   3,
+		CacheScope:        "agent_id|model",
+		Clustering:        b.Detectors.Cluster.Similarity > 0,
 		ClusterSimilarity: b.Detectors.Cluster.Similarity,
 		ClusterMaxSize:    b.Detectors.Cluster.MaxSize,
-		CostScanLimitUSD:  b.Detectors.Proxy.CostScanLimitUSD, // budget-стоп, п. 10.4
-	}
-	if len(b.Detectors.Agents) > 0 {
-		// идентичность агента для ключа кэша вердиктов (п. 10.5)
-		cfg.CacheScope = b.Detectors.Agents[0].ID + "|" + b.Detectors.Agents[0].Model
+		CostScanLimitUSD:  b.Detectors.Proxy.CostScanLimitUSD,
+		Sensitivity:       sensitivityMap(b.Taxonomy),
+		TaxonomyLabels:    taxonomyLabels(b.Taxonomy),
 	}
 	return cfg
 }
@@ -848,6 +851,8 @@ func runServe(args []string) int {
 		// Rate-limit входа (п. 14, brute-force admin-токена): 5 неудач за
 		// 10 мин → блокировка 15 мин (Defaults, S7г).
 		Limiter: auth.NewAttemptLimiter(auth.LimiterMaxFails, auth.LimiterWindow, auth.LimiterBlockFor),
+		// S9-6: общий rate-limit запросов API на субъекта (п. 11.2: 100 req/s).
+		RateLimiter: api.NewRateLimiter(nil),
 	}
 	if b.Connections.SSO.AdminTokenFallback {
 		authCfg.AdminToken = os.Getenv("CLASSIFIER_ADMIN_TOKEN")
