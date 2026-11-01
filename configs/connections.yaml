@@ -5,10 +5,11 @@ version: "1"
 
 sources:
   # Тестовый контур (docs/progress/2026-10-18-test-environment.md):
-  # БД-источники на 192.168.31.119, пароли стенда — через ENV.
+  # БД-источники на 192.168.31.64 (с 2026-11-01; ранее 192.168.31.119),
+  # пароли стенда — через ENV.
   - name: ch-test
     type: clickhouse
-    dsn: "clickhouse://test:${CH_TEST_PASSWORD}@192.168.31.119:9000/default"
+    dsn: "clickhouse://test:${CH_TEST_PASSWORD}@192.168.31.64:9000/default"
     # schedule: "0 2 * * *" # периодический перескан источника (blueprint п. 15, cron; пусто — только ручной запуск)
     # Лимиты на источник (blueprint п. 13.2; 0/опущено — дефолт спецификации):
     # max_concurrent_scans: 1    # активных прогонов источника (serve)
@@ -17,7 +18,7 @@ sources:
     # scan_window: "02:00-06:00" # окно пересканов (локальное время; старт вне окна откладывается шедулером; через полночь — "22:00-02:00")
   - name: mongo-test
     type: mongodb
-    uri: "mongodb://test:${MONGO_TEST_PASSWORD}@192.168.31.119:27017/testdb"
+    uri: "mongodb://test:${MONGO_TEST_PASSWORD}@192.168.31.64:27017/testdb"
 
   # Примеры продуктивных подключений (blueprint п. 12) — read-only учётки.
   - name: ch-prod
