@@ -53,6 +53,9 @@ services:
     environment:
       LLM_MAIN_KEY: smoke-dummy # не используется (скан без -llm)
       LLM_STRONG_KEY: smoke-dummy
+      # S9-8 (З2, п. 12): при выключенном SSO serve требует admin-token —
+      # вход в UI через /login, в API — заголовком X-Admin-Token.
+      CLASSIFIER_ADMIN_TOKEN: zond-smoke-admin
     command: ["serve", "-config", "/configs", "-db", "/data/zond.db", "-addr", "0.0.0.0:8080"]
     ports:
       - "127.0.0.1:8080:8080"

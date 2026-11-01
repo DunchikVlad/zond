@@ -103,7 +103,8 @@ smoke: ## Подъём smoke-контура и quick-скан до вердик�
 	docker compose -f deploy/docker-compose.yml --profile smoke run --rm --build smoke-scan
 	@echo "smoke: скан завершён (код 0) — вердикты в UI:"
 	docker compose -f deploy/docker-compose.yml up -d app
-	@echo "  http://127.0.0.1:8080  (остановка и очистка: make smoke-clean)"
+	@echo "  http://127.0.0.1:8080  (вход по admin-token zond-smoke-admin — S9-8, п. 12)"
+	@echo "  (остановка и очистка: make smoke-clean)"
 
 smoke-clean: ## Остановка и очистка smoke-контура (тома)
 	docker compose -f deploy/docker-compose.yml down -v

@@ -38,9 +38,11 @@ func Open(dsn string) (connector.Connector, error) {
 func (c *chConnector) Ping(ctx context.Context) error { return c.db.PingContext(ctx) }
 
 // ListTables — system.* и materialized-цели (.inner.*) исключаем (п. 9).
+// Сравнение баз через lower(): ClickHouse 26.x создаёт системные view и в
+// регистровом варианте INFORMATION_SCHEMA (стенд 2026-11-01, замечание З1).
 func (c *chConnector) ListTables(ctx context.Context) ([]connector.TableRef, error) {
 	const q = `SELECT database, name FROM system.tables ` +
-		`WHERE database NOT IN ('system','information_schema') AND name NOT LIKE '.inner.%' ` +
+		`WHERE lower(database) NOT IN ('system','information_schema') AND name NOT LIKE '.inner.%' ` +
 		`ORDER BY database, name`
 	rows, err := c.db.QueryContext(ctx, q)
 	if err != nil {

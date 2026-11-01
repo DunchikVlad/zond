@@ -41,12 +41,12 @@ func tokenAllows(t *store.APIToken, a auth.Action) bool {
 type AuthConfig struct {
 	Enabled bool // sso.enabled из connections.yaml
 	// AdminToken — аварийный доступ (env CLASSIFIER_ADMIN_TOKEN, п. 11.3);
-	// пустой или admin_token_fallback=false → отключён.
+	// при Enabled=false — единственный метод входа (п. 12, S9-8 З2);
+	// пустой (и admin_token_fallback=false при SSO) → отключён.
 	AdminToken string
 	Sessions   *auth.SessionStore // nil → SSO-сессии не принимаются
 	// Limiter — rate-limit неудачных входов (п. 14, brute-force);
-	// nil — без ограничения (тесты, контур без SSO не затрагивается:
-	// middleware отключён вместе с auth.Enabled).
+	// nil — без ограничения (тесты).
 	Limiter *auth.AttemptLimiter
 	// RateLimiter — общий rate-limit запросов API на субъекта (п. 11.2, S9-6);
 	// nil — без ограничения.
@@ -54,11 +54,15 @@ type AuthConfig struct {
 }
 
 // withAuth — middleware аутентификации: разрешает субъекта запроса.
-// При выключенном SSO (dev-контур) — пропускает как api.Actor (режим 5б).
-// При включённом: cookie-сессия → Bearer-токен → admin-token; иначе 401.
+// При выключенном SSO без admin-token (dev) — пропускает как api.Actor
+// (режим 5б). При включённом SSO или заданном admin-token (S9-8, З2):
+// cookie-сессия → Bearer-токен → admin-token; иначе 401.
 // Неудачные попытки учитываются Limiter'ом (п. 14): блокировка — 429.
 func (s *Server) withAuth(next http.Handler) http.Handler {
-	if s.auth == nil || !s.auth.Enabled {
+	// S9-8 (З2): middleware активен и при выключенном SSO, если задан
+	// admin-token (blueprint п. 12: режим без SSO — «только admin-токен»),
+	// иначе API/UI полностью открыты. Совсем без auth — только dev (nil).
+	if s.auth == nil || (!s.auth.Enabled && s.auth.AdminToken == "") {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -167,7 +171,8 @@ func tokenRole(t *store.APIToken) auth.Role {
 // по роли, токены — по scope (admin-token имеет роль admin). Отказ 403
 // аудируется (п. 14.2 authorization: роль, ресурс, subject).
 func (s *Server) requireAction(a auth.Action, h http.HandlerFunc) http.HandlerFunc {
-	if s.auth == nil || !s.auth.Enabled {
+	// S9-8 (З2): как withAuth — token-only режим тоже проходит RBAC.
+	if s.auth == nil || (!s.auth.Enabled && s.auth.AdminToken == "") {
 		return h
 	}
 	return func(w http.ResponseWriter, r *http.Request) {

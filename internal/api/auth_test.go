@@ -290,3 +290,35 @@ func TestAuthRateLimitBruteForce(t *testing.T) {
 		t.Fatalf("аудит: limited=%d failures=%d (entries %+v)", limited, failures, entries)
 	}
 }
+
+// TestAdminTokenOnlyMode — S9-8 (З2, blueprint п. 12): SSO выключен, но
+// задан admin-token → API закрыт: без токена и с неверным токеном 401,
+// с верным X-Admin-Token 200 (субъект admin, RBAC работает — export доступен).
+func TestAdminTokenOnlyMode(t *testing.T) {
+	srv, _ := newTestServer(t, WithAuth(AuthConfig{Enabled: false, AdminToken: "secret"}))
+	if code := doAuth(t, srv, http.MethodGet, "/api/v1/scans", "", nil); code != http.StatusUnauthorized {
+		t.Fatalf("без токена: %d", code)
+	}
+	if code := doAuth(t, srv, http.MethodGet, "/api/v1/scans", "",
+		map[string]string{"X-Admin-Token": "wrong"}); code != http.StatusUnauthorized {
+		t.Fatalf("неверный токен: %d", code)
+	}
+	if code := doAuth(t, srv, http.MethodGet, "/api/v1/scans", "",
+		map[string]string{"X-Admin-Token": "secret"}); code != http.StatusOK {
+		t.Fatalf("верный токен: %d", code)
+	}
+	// RBAC не отключён вместе с SSO: admin-token имеет роль admin → export разрешён.
+	if code := doAuth(t, srv, http.MethodGet, "/api/v1/export?scan_id=x&format=csv", "",
+		map[string]string{"X-Admin-Token": "secret"}); code == http.StatusUnauthorized || code == http.StatusForbidden {
+		t.Fatalf("export с admin-token: %d", code)
+	}
+}
+
+// TestNoAuthDevMode — S9-8 (З2): ни SSO, ни admin-token (dev/тесты) —
+// прежнее прозрачное поведение (200 без субъекта).
+func TestNoAuthDevMode(t *testing.T) {
+	srv, _ := newTestServer(t, WithAuth(AuthConfig{Enabled: false}))
+	if code := doAuth(t, srv, http.MethodGet, "/api/v1/scans", "", nil); code != http.StatusOK {
+		t.Fatalf("dev-режим: %d", code)
+	}
+}

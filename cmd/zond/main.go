@@ -857,9 +857,21 @@ func runServe(args []string) int {
 	if b.Connections.SSO.AdminTokenFallback {
 		authCfg.AdminToken = os.Getenv("CLASSIFIER_ADMIN_TOKEN")
 	}
+	// S9-8 (З2, blueprint п. 12): при выключенном SSO admin-token — единственный
+	// метод входа («только admin-токен»); без него serve открыт всем — fail-closed.
+	if !b.Connections.SSO.Enabled {
+		authCfg.AdminToken = os.Getenv("CLASSIFIER_ADMIN_TOKEN")
+		if authCfg.AdminToken == "" {
+			fmt.Fprintln(os.Stderr, "serve: sso выключен и CLASSIFIER_ADMIN_TOKEN не задан — "+
+				"открытый доступ запрещён (blueprint п. 12): задайте токен или включите sso")
+			return 2
+		}
+	}
 	if authCfg.Enabled {
 		log.Info("serve: аутентификация включена (SSO/API-токены)",
 			"admin_token_fallback", authCfg.AdminToken != "")
+	} else if authCfg.AdminToken != "" {
+		log.Info("serve: аутентификация включена (admin-token, SSO выключен — п. 12)")
 	}
 	var opts []api.Option
 	opts = append(opts, api.WithRunner(runner), api.WithExportMaxRows(*exportMax), api.WithAuth(authCfg))
@@ -917,6 +929,7 @@ func runServe(args []string) int {
 	// API-сервера, всё остальное (страницы) — у web-сервера (ADR-0007,
 	// server-rendered + HTMX из embed.FS).
 	webSrv, err := web.New(st, log, sessions, b.Connections.SSO.Enabled, runner, b,
+		web.WithAdminToken(authCfg.AdminToken), // S9-8 (З2): /login при выключенном SSO
 		web.WithConns(func() *config.Connections { return bundleHot.Load().Connections }),
 		web.WithConnsPath(connsPath),
 		web.WithApplyConns(applyConns),

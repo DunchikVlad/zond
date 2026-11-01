@@ -10,6 +10,7 @@ package web
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -56,10 +58,15 @@ type Server struct {
 	log         *slog.Logger
 	sessions    *auth.SessionStore
 	authEnabled bool
-	runner      ScanRunner
-	cfg         *config.Bundle
-	tmpl        *template.Template
-	nowFn       func() time.Time
+	// S9-8 (З2): при выключенном SSO вход — только по admin-token
+	// (blueprint п. 12): /login принимает токен и выдаёт сессию; пустой
+	// token → прежний dev-режим (субъект dev/admin, только тесты).
+	adminToken   string
+	loginLimiter *auth.AttemptLimiter
+	runner       ScanRunner
+	cfg          *config.Bundle
+	tmpl         *template.Template
+	nowFn        func() time.Time
 
 	// Инкремент S8-7: управление источниками из UI. conns — горячий
 	// провайдер connections (заменяется serve после правки файла); connsPath
@@ -88,6 +95,17 @@ type Option func(*Server)
 // WithConns — горячий провайдер connections (после правки файла из UI).
 func WithConns(fn func() *config.Connections) Option {
 	return func(s *Server) { s.conns = fn }
+}
+
+// WithAdminToken — S9-8 (З2): admin-token для входа при выключенном SSO
+// (blueprint п. 12); непустой включает /login и требование сессии.
+func WithAdminToken(tok string) Option {
+	return func(s *Server) {
+		s.adminToken = tok
+		if tok != "" {
+			s.loginLimiter = auth.NewAttemptLimiter(auth.LimiterMaxFails, auth.LimiterWindow, auth.LimiterBlockFor)
+		}
+	}
 }
 
 // WithConnsPath — путь к редактируемому connections.yaml.
@@ -182,6 +200,9 @@ func (s *Server) Handler() http.Handler {
 	static, _ := fs.Sub(staticFS, "static")
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
 	mux.HandleFunc("GET /", s.handleIndex)
+	// S9-8 (З2): вход по admin-token при выключенном SSO (п. 12).
+	mux.HandleFunc("GET /login", s.handleLoginForm)
+	mux.HandleFunc("POST /login", s.handleLogin)
 	mux.HandleFunc("GET /scans", s.handleScans)
 	mux.HandleFunc("POST /scans/start", s.requireRole(auth.ActionScan, s.handleScanStart))
 	mux.HandleFunc("POST /scans/{id}/stop", s.requireRole(auth.ActionScan, s.handleScanStop))
@@ -284,17 +305,20 @@ func (s *Server) csrfToken(r *http.Request) string {
 	return ""
 }
 
-// withAuth — субъект запроса: dev-режим (SSO выключен) → admin "dev";
-// включён → cookie-сессия, иначе GET-страницы уходят на /saml/login (п. 11.3),
-// POST → 403.
+// withAuth — субъект запроса. Режимы: SSO включён → cookie-сессия, иначе
+// GET-страницы уходят на /saml/login (п. 11.3), POST → 403; SSO выключен
+// и задан admin-token (S9-8, З2, п. 12) → та же проверка сессии, вход
+// через /login; SSO выключен без токена → dev-режим (admin "dev", тесты).
 func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		subj := auth.Subject{Actor: "dev", Role: auth.RoleAdmin}
-		if s.authEnabled {
+		if s.authEnabled || s.adminToken != "" {
 			// /saml/* в этом mux не обслуживается (serve отдаёт их API) —
 			// но redirect на /saml/login не должен заворачиваться обратно
-			// в auth (петля), поэтому пропускаем префикс как есть.
-			if strings.HasPrefix(r.URL.Path, "/saml/") {
+			// в auth (петля), поэтому пропускаем префикс как есть; /login и
+			// статика — точки входа, доступны анонимно.
+			if strings.HasPrefix(r.URL.Path, "/saml/") || r.URL.Path == "/login" ||
+				strings.HasPrefix(r.URL.Path, "/static/") {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -305,11 +329,15 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 				}
 			}
 			if subj.Actor == "" {
+				loginURL := "/login"
+				if s.authEnabled {
+					loginURL = "/saml/login"
+				}
 				if r.Method == http.MethodGet {
-					http.Redirect(w, r, "/saml/login", http.StatusFound)
+					http.Redirect(w, r, loginURL, http.StatusFound)
 					return
 				}
-				s.renderError(w, http.StatusForbidden, "требуется SSO-сессия")
+				s.renderError(w, http.StatusForbidden, "требуется аутентификация (SSO-сессия или вход по admin-token)")
 				return
 			}
 		}
@@ -365,6 +393,73 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, http.StatusNotFound, "страница не найдена")
 		return
 	}
+	http.Redirect(w, r, "/scans", http.StatusFound)
+}
+
+// handleLoginForm — форма входа по admin-token (режим без SSO, п. 12, S9-8).
+// В режиме SSO вход — через /saml/login; dev-режим без токена — без /login.
+func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
+	if s.adminToken == "" {
+		if s.authEnabled {
+			http.Redirect(w, r, "/saml/login", http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, "/scans", http.StatusFound)
+		return
+	}
+	s.render(w, http.StatusOK, "login.html", map[string]any{
+		"Title": "Вход", "CSRF": s.csrfToken(r), "Error": r.URL.Query().Get("err"),
+	})
+}
+
+// handleLogin — проверка admin-token (constant-time) и выдача сессии.
+// Brute-force: общий AttemptLimiter по IP (п. 14); каждое использование
+// токена — warn-событие аудита (п. 14.2).
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if s.adminToken == "" {
+		s.renderError(w, http.StatusNotFound, "вход по admin-token отключён")
+		return
+	}
+	key, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		key = r.RemoteAddr
+	}
+	if s.loginLimiter != nil {
+		if remaining, blocked := s.loginLimiter.Blocked(key); blocked {
+			_ = s.st.AppendAudit(r.Context(), []audit.Event{{
+				Actor: "web", Category: audit.CatAuth, Action: "auth_rate_limited", Target: "/login",
+				Details: map[string]any{"remaining_ms": remaining.Milliseconds()}, TS: s.nowFn().UTC(),
+			}})
+			s.renderError(w, http.StatusTooManyRequests, "слишком много неудачных попыток входа — повторите позже")
+			return
+		}
+	}
+	tok := r.PostFormValue("token")
+	if subtle.ConstantTimeCompare([]byte(tok), []byte(s.adminToken)) != 1 {
+		if s.loginLimiter != nil {
+			s.loginLimiter.RecordFail(key)
+		}
+		_ = s.st.AppendAudit(r.Context(), []audit.Event{{
+			Actor: "web", Category: audit.CatAuth, Action: "login_failure", Target: "/login",
+			Details: map[string]any{"reason": "неверный admin-token"}, TS: s.nowFn().UTC(),
+		}})
+		s.render(w, http.StatusForbidden, "login.html", map[string]any{
+			"Title": "Вход", "CSRF": s.csrfToken(r), "Error": "неверный токен",
+		})
+		return
+	}
+	if s.loginLimiter != nil {
+		s.loginLimiter.Reset(key)
+	}
+	sess := s.sessions.Create("admin-token", auth.RoleAdmin)
+	http.SetCookie(w, &http.Cookie{
+		Name: auth.SessionCookie, Value: sess.ID, Path: "/", HttpOnly: true,
+		SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, Expires: sess.ExpiresAt,
+	})
+	_ = s.st.AppendAudit(r.Context(), []audit.Event{{
+		Actor: "admin-token", Category: audit.CatAuth, Action: "admin_token_used", Target: "/login",
+		Details: map[string]any{"level": "warn"}, TS: s.nowFn().UTC(),
+	}})
 	http.Redirect(w, r, "/scans", http.StatusFound)
 }
 
